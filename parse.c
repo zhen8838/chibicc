@@ -306,7 +306,7 @@ static Obj *new_var(char *name, Type *ty) {
   push_scope(name)->var = var;
   return var;
 }
-
+// 新构造一个local var, ⚠️这里有个全局的locals变量,每次构造新的local var相当于入栈(放到locals链表的头部)
 static Obj *new_lvar(char *name, Type *ty) {
   Obj *var = new_var(name, ty);
   var->is_local = true;
@@ -3241,7 +3241,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   if (ty->is_variadic)
     fn->va_area = new_lvar("__va_area__", array_of(ty_char, 136));
   fn->alloca_bottom = new_lvar("__alloca_size__", pointer_to(ty_char));
-
+  // 这个__alloca_size__是用来做啥的?
   tok = skip(tok, "{");
 
   // [https://www.sigbus.info/n1570#6.4.2.2p1] "__func__" is

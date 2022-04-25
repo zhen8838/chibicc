@@ -2,6 +2,7 @@ CFLAGS=-std=c11 -g -fno-common -Wall -Wno-switch
 
 SRCS=$(wildcard *.c)
 OBJS=$(SRCS:.c=.o)
+CC=clang
 
 TEST_SRCS=$(wildcard test/*.c)
 TESTS=$(TEST_SRCS:.c=.exe)

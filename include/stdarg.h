@@ -18,7 +18,7 @@ typedef __va_elem va_list[1];
 static void *__va_arg_mem(__va_elem *ap, int sz, int align) {
   void *p = ap->overflow_arg_area;
   if (align > 8)
-    p = (p + 15) / 16 * 16;
+    p = (void*)((long)(p + 15) / 16 * 16);
   ap->overflow_arg_area = ((unsigned long)p + sz + 7) / 8 * 8;
   return p;
 }
@@ -51,7 +51,7 @@ static void *__va_arg_fp(__va_elem *ap, int sz, int align) {
 
 #define va_copy(dest, src) ((dest)[0] = (src)[0])
 
-#define __GNUC_VA_LIST 1
-typedef va_list __gnuc_va_list;
+#define __GNUC_my_va_list 1
+typedef my_va_list __gnuc_my_va_list;
 
 #endif

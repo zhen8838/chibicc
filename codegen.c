@@ -690,7 +690,7 @@ static void builtin_alloca(void) {
 
 // Generate code for a given node.
 static void gen_expr(Node *node) {
-  println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
+  // println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no); //关掉debug信息 
 
   switch (node->kind) {
   case ND_NULL_EXPR:
@@ -705,7 +705,7 @@ static void gen_expr(Node *node) {
     }
     case TY_DOUBLE: {
       union { double f64; uint64_t u64; } u = { node->fval };
-      println("  mov $%lu, %%rax  # double %Lf", u.u64, node->fval);
+      println("  mov $%llu, %%rax  # double %Lf", u.u64, node->fval);
       println("  movq %%rax, %%xmm0");
       return;
     }
@@ -713,16 +713,16 @@ static void gen_expr(Node *node) {
       union { long double f80; uint64_t u64[2]; } u;
       memset(&u, 0, sizeof(u));
       u.f80 = node->fval;
-      println("  mov $%lu, %%rax  # long double %Lf", u.u64[0], node->fval);
+      println("  mov $%llu, %%rax  # long double %Lf", u.u64[0], node->fval);
       println("  mov %%rax, -16(%%rsp)");
-      println("  mov $%lu, %%rax", u.u64[1]);
+      println("  mov $%llu, %%rax", u.u64[1]);
       println("  mov %%rax, -8(%%rsp)");
       println("  fldt -16(%%rsp)");
       return;
     }
     }
 
-    println("  mov $%ld, %%rax", node->val);
+    println("  mov $%lld, %%rax", node->val);
     return;
   }
   case ND_NEG:
@@ -806,7 +806,7 @@ static void gen_expr(Node *node) {
     for (Node *n = node->body; n; n = n->next)
       gen_stmt(n);
     return;
-  case ND_COMMA:
+  case ND_COMMA: // 这里是lhs 置0,  rhs 赋值 
     gen_expr(node->lhs);
     gen_expr(node->rhs);
     return;
@@ -816,8 +816,8 @@ static void gen_expr(Node *node) {
     return;
   case ND_MEMZERO:
     // `rep stosb` is equivalent to `memset(%rdi, %al, %rcx)`.
-    println("  mov $%d, %%rcx", node->var->ty->size);
-    println("  lea %d(%%rbp), %%rdi", node->var->offset);
+    println("  mov $%d, %%rcx", node->var->ty->size); // rcx 保存size信息
+    println("  lea %d(%%rbp), %%rdi", node->var->offset); //
     println("  mov $0, %%al");
     println("  rep stosb");
     return;
@@ -1092,7 +1092,7 @@ static void gen_expr(Node *node) {
     error_tok(node->tok, "invalid expression");
   }
   }
-
+  // 这里是处理一些内置的计算.
   gen_expr(node->rhs);
   push();
   gen_expr(node->lhs);
@@ -1186,7 +1186,7 @@ static void gen_expr(Node *node) {
 }
 
 static void gen_stmt(Node *node) {
-  println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
+  // println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no); //关掉debug信息
 
   switch (node->kind) {
   case ND_IF: {
@@ -1311,7 +1311,7 @@ static void assign_lvar_offsets(Obj *prog) {
   for (Obj *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function)
       continue;
-
+    // NOTE 进入函数开始分配local var.
     // If a function has many parameters, some parameters are
     // inevitably passed by stack rather than by register.
     // The first passed-by-stack parameter resides at RBP+16.
@@ -1443,7 +1443,7 @@ static void store_fp(int r, int offset, int sz) {
   }
   unreachable();
 }
-
+// 从栈中加载数据到通用寄存器中, 这里是根据size决定不同的arg reg 组. 如果是4 byte那就是argreg32.
 static void store_gp(int r, int offset, int sz) {
   switch (sz) {
   case 1:
@@ -1488,10 +1488,10 @@ static void emit_text(Obj *prog) {
     current_fn = fn;
 
     // Prologue
-    println("  push %%rbp");
-    println("  mov %%rsp, %%rbp");
-    println("  sub $%d, %%rsp", fn->stack_size);
-    println("  mov %%rsp, %d(%%rbp)", fn->alloca_bottom->offset);
+    println("  push %%rbp"); // 保存老的函数的帧栈
+    println("  mov %%rsp, %%rbp"); // sp指向老的fp的位置
+    println("  sub $%d, %%rsp", fn->stack_size); // 移动sp到当前程序的栈顶
+    println("  mov %%rsp, %d(%%rbp)", fn->alloca_bottom->offset); // ⚠️这里是他特有的的alloca_bottom变量,此时把sp指向alloca_bottom的位置.
 
     // Save arg registers if function is variadic
     if (fn->va_area) {
@@ -1530,14 +1530,14 @@ static void emit_text(Obj *prog) {
       println("  movsd %%xmm7, %d(%%rbp)", off + 128);
     }
 
-    // Save passed-by-register arguments to the stack
+    // Save passed-by-register arguments to the stack 把帧上的内容copy到寄存器上(即寄存器传参)
     int gp = 0, fp = 0;
     for (Obj *var = fn->params; var; var = var->next) {
       if (var->offset > 0)
-        continue;
+        continue; // 寄存器传参的var的offset都是负的!, 因为这样便于支持变长参数.
 
       Type *ty = var->ty;
-
+      // 根据当前var的长度来决定如何store
       switch (ty->kind) {
       case TY_STRUCT:
       case TY_UNION:

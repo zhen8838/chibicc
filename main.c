@@ -1,7 +1,12 @@
 #include "chibicc.h"
 
 typedef enum {
-  FILE_NONE, FILE_C, FILE_ASM, FILE_OBJ, FILE_AR, FILE_DSO,
+  FILE_NONE,
+  FILE_C,
+  FILE_ASM,
+  FILE_OBJ,
+  FILE_AR,
+  FILE_DSO,
 } FileType;
 
 StringArray include_paths;
@@ -41,7 +46,7 @@ static void usage(int status) {
 
 static bool take_arg(char *arg) {
   char *x[] = {
-    "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker",
+      "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker",
   };
 
   for (int i = 0; i < sizeof(x) / sizeof(*x); i++)
@@ -316,18 +321,14 @@ static void parse_args(int argc, char **argv) {
     }
 
     // These options are ignored for now.
-    if (!strncmp(argv[i], "-O", 2) ||
-        !strncmp(argv[i], "-W", 2) ||
-        !strncmp(argv[i], "-g", 2) ||
-        !strncmp(argv[i], "-std=", 5) ||
+    if (!strncmp(argv[i], "-O", 2) || !strncmp(argv[i], "-W", 2) ||
+        !strncmp(argv[i], "-g", 2) || !strncmp(argv[i], "-std=", 5) ||
         !strcmp(argv[i], "-ffreestanding") ||
         !strcmp(argv[i], "-fno-builtin") ||
         !strcmp(argv[i], "-fno-omit-frame-pointer") ||
         !strcmp(argv[i], "-fno-stack-protector") ||
-        !strcmp(argv[i], "-fno-strict-aliasing") ||
-        !strcmp(argv[i], "-m64") ||
-        !strcmp(argv[i], "-mno-red-zone") ||
-        !strcmp(argv[i], "-w"))
+        !strcmp(argv[i], "-fno-strict-aliasing") || !strcmp(argv[i], "-m64") ||
+        !strcmp(argv[i], "-mno-red-zone") || !strcmp(argv[i], "-w"))
       continue;
 
     if (argv[i][0] == '-' && argv[i][1] != '\0')
@@ -388,7 +389,7 @@ static char *create_tmpfile(void) {
   return path;
 }
 
-static void run_subprocess(char **argv) {
+static void run_subprocess(char **argv, int argc) {
   // If -### is given, dump the subprocess's command line.
   if (opt_hash_hash_hash) {
     fprintf(stderr, "%s", argv[0]);
@@ -397,6 +398,10 @@ static void run_subprocess(char **argv) {
     fprintf(stderr, "\n");
   }
 
+  printf("\ncall subprocess %d:\n", argc);
+  for (int i = 0; i < argc; i++) {
+    fprintf(stdout, "%s ", argv[i]);
+  }
   if (fork() == 0) {
     // Child process. Run a new command.
     execvp(argv[0], argv);
@@ -406,7 +411,8 @@ static void run_subprocess(char **argv) {
 
   // Wait for the child process to finish.
   int status;
-  while (wait(&status) > 0);
+  while (wait(&status) > 0)
+    ;
   if (status != 0)
     exit(1);
 }
@@ -426,7 +432,7 @@ static void run_cc1(int argc, char **argv, char *input, char *output) {
     args[argc++] = output;
   }
 
-  run_subprocess(args);
+  run_subprocess(args, argc);
 }
 
 // Print tokens to stdout. Used for -E.
@@ -569,7 +575,7 @@ static void cc1(void) {
 
 static void assemble(char *input, char *output) {
   char *cmd[] = {"as", "-c", input, "-o", output, NULL};
-  run_subprocess(cmd);
+  run_subprocess(cmd, 6);
 }
 
 static char *find_file(char *pattern) {
@@ -598,9 +604,9 @@ static char *find_libpath(void) {
 
 static char *find_gcc_libpath(void) {
   char *paths[] = {
-    "/usr/lib/gcc/x86_64-linux-gnu/*/crtbegin.o",
-    "/usr/lib/gcc/x86_64-pc-linux-gnu/*/crtbegin.o", // For Gentoo
-    "/usr/lib/gcc/x86_64-redhat-linux/*/crtbegin.o", // For Fedora
+      "/usr/lib/gcc/x86_64-linux-gnu/*/crtbegin.o",
+      "/usr/lib/gcc/x86_64-pc-linux-gnu/*/crtbegin.o", // For Gentoo
+      "/usr/lib/gcc/x86_64-redhat-linux/*/crtbegin.o", // For Fedora
   };
 
   for (int i = 0; i < sizeof(paths) / sizeof(*paths); i++) {
@@ -676,7 +682,7 @@ static void run_linker(StringArray *inputs, char *output) {
   strarray_push(&arr, format("%s/crtn.o", libpath));
   strarray_push(&arr, NULL);
 
-  run_subprocess(arr.data);
+  run_subprocess(arr.data, arr.len);
 }
 
 static FileType get_file_type(char *filename) {

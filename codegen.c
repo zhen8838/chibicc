@@ -5,17 +5,16 @@
 
 static FILE *output_file;
 static int depth;
-static char *argreg8[] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
-static char *argreg16[] = {"%di", "%si", "%dx", "%cx", "%r8w", "%r9w"};
+// static char *argreg8[] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
+// static char *argreg16[] = {"%di", "%si", "%dx", "%cx", "%r8w", "%r9w"};
 static char *argreg32[] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
-static char *argreg64[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+// static char *argreg64[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 static Obj *current_fn;
 
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
 
-__attribute__((format(printf, 1, 2)))
-static void println(char *fmt, ...) {
+__attribute__((format(printf, 1, 2))) static void println(char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   vfprintf(output_file, fmt, ap);
@@ -52,26 +51,32 @@ static void popf(int reg) {
 
 // Round up `n` to the nearest multiple of `align`. For instance,
 // align_to(5, 8) returns 8 and align_to(11, 8) returns 16.
-int align_to(int n, int align) {
-  return (n + align - 1) / align * align;
-}
+int align_to(int n, int align) { return (n + align - 1) / align * align; }
 
 static char *reg_dx(int sz) {
   switch (sz) {
-  case 1: return "%dl";
-  case 2: return "%dx";
-  case 4: return "%edx";
-  case 8: return "%rdx";
+  case 1:
+    return "%dl";
+  case 2:
+    return "%dx";
+  case 4:
+    return "%edx";
+  case 8:
+    return "%rdx";
   }
   unreachable();
 }
 
 static char *reg_ax(int sz) {
   switch (sz) {
-  case 1: return "%al";
-  case 2: return "%ax";
-  case 4: return "%eax";
-  case 8: return "%rax";
+  case 1:
+    return "%al";
+  case 2:
+    return "%ax";
+  case 4:
+    return "%eax";
+  case 8:
+    return "%rax";
   }
   unreachable();
 }
@@ -94,45 +99,47 @@ static void gen_addr(Node *node) {
     }
 
     if (opt_fpic) {
+      unreachable();
       // Thread-local variable
-      if (node->var->is_tls) {
-        println("  data16 lea %s@tlsgd(%%rip), %%rdi", node->var->name);
-        println("  .value 0x6666");
-        println("  rex64");
-        println("  call __tls_get_addr@PLT");
-        return;
-      }
+      // if (node->var->is_tls) {
+      //   println("  data16 lea %s@tlsgd(%%rip), %%rdi", node->var->name);
+      //   println("  .value 0x6666");
+      //   println("  rex64");
+      //   println("  call __tls_get_addr@PLT");
+      //   return;
+      // }
 
-      // Function or global variable
-      println("  mov %s@GOTPCREL(%%rip), %%rax", node->var->name);
-      return;
+      // // Function or global variable
+      // println("  mov %s@GOTPCREL(%%rip), %%rax", node->var->name);
+      // return;
     }
 
     // Thread-local variable
     if (node->var->is_tls) {
-      println("  mov %%fs:0, %%rax");
-      println("  add $%s@tpoff, %%rax", node->var->name);
-      return;
+      unreachable();
+      // println("  mov %%fs:0, %%rax");
+      // println("  add $%s@tpoff, %%rax", node->var->name);
+      // return;
     }
 
     // Here, we generate an absolute address of a function or a global
     // variable. Even though they exist at a certain address at runtime,
     // their addresses are not known at link-time for the following
     // two reasons.
-    //
+    // 这里使用相对地址去索引function 和 global var 有以下两个原因
     //  - Address randomization: Executables are loaded to memory as a
     //    whole but it is not known what address they are loaded to.
     //    Therefore, at link-time, relative address in the same
     //    exectuable (i.e. the distance between two functions in the
     //    same executable) is known, but the absolute address is not
     //    known.
-    //
+    //  - 加载到内存后,相对地址不变,绝对地址会改变
     //  - Dynamic linking: Dynamic shared objects (DSOs) or .so files
     //    are loaded to memory alongside an executable at runtime and
     //    linked by the runtime loader in memory. We know nothing
     //    about addresses of global stuff that may be defined by DSOs
     //    until the runtime relocation is complete.
-    //
+    //  - 动态链接后不知道dso如何计算地址的.
     // In order to deal with the former case, we use RIP-relative
     // addressing, denoted by `(%rip)`. For the latter, we obtain an
     // address of a stuff that may be in a shared object file from the
@@ -140,10 +147,12 @@ static void gen_addr(Node *node) {
 
     // Function
     if (node->ty->kind == TY_FUNC) {
-      if (node->var->is_definition)
+      if (node->var->is_definition) {
         println("  lea %s(%%rip), %%rax", node->var->name);
-      else
-        println("  mov %s@GOTPCREL(%%rip), %%rax", node->var->name);
+      } else {
+        // println("  mov %s@GOTPCREL(%%rip), %%rax", node->var->name);
+        unreachable(); // 暂时不支持调用动态链接
+      }
       return;
     }
 
@@ -324,12 +333,12 @@ static char i64f80[] = "movq %rax, -8(%rsp); fildll -8(%rsp)";
 
 static char u64f32[] = "cvtsi2ssq %rax, %xmm0";
 static char u64f64[] =
-  "test %rax,%rax; js 1f; pxor %xmm0,%xmm0; cvtsi2sd %rax,%xmm0; jmp 2f; "
-  "1: mov %rax,%rdi; and $1,%eax; pxor %xmm0,%xmm0; shr %rdi; "
-  "or %rax,%rdi; cvtsi2sd %rdi,%xmm0; addsd %xmm0,%xmm0; 2:";
+    "test %rax,%rax; js 1f; pxor %xmm0,%xmm0; cvtsi2sd %rax,%xmm0; jmp 2f; "
+    "1: mov %rax,%rdi; and $1,%eax; pxor %xmm0,%xmm0; shr %rdi; "
+    "or %rax,%rdi; cvtsi2sd %rdi,%xmm0; addsd %xmm0,%xmm0; 2:";
 static char u64f80[] =
-  "mov %rax, -8(%rsp); fildq -8(%rsp); test %rax, %rax; jns 1f;"
-  "mov $1602224128, %eax; mov %eax, -4(%rsp); fadds -4(%rsp); 1:";
+    "mov %rax, -8(%rsp); fildq -8(%rsp); test %rax, %rax; jns 1f;"
+    "mov $1602224128, %eax; mov %eax, -4(%rsp); fadds -4(%rsp); 1:";
 
 static char f32i8[] = "cvttss2sil %xmm0, %eax; movsbl %al, %eax";
 static char f32u8[] = "cvttss2sil %xmm0, %eax; movzbl %al, %eax";
@@ -353,8 +362,8 @@ static char f64u64[] = "cvttsd2siq %xmm0, %rax";
 static char f64f32[] = "cvtsd2ss %xmm0, %xmm0";
 static char f64f80[] = "movsd %xmm0, -8(%rsp); fldl -8(%rsp)";
 
-#define FROM_F80_1                                           \
-  "fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; " \
+#define FROM_F80_1                                                             \
+  "fnstcw -10(%rsp); movzwl -10(%rsp), %eax; or $12, %ah; "                    \
   "mov %ax, -12(%rsp); fldcw -12(%rsp); "
 
 #define FROM_F80_2 " -24(%rsp); fldcw -10(%rsp); "
@@ -371,20 +380,32 @@ static char f80f32[] = "fstps -8(%rsp); movss -8(%rsp), %xmm0";
 static char f80f64[] = "fstpl -8(%rsp); movsd -8(%rsp), %xmm0";
 
 static char *cast_table[][11] = {
-  // i8   i16     i32     i64     u8     u16     u32     u64     f32     f64     f80
-  {NULL,  NULL,   NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i8
-  {i32i8, NULL,   NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i16
-  {i32i8, i32i16, NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i32
-  {i32i8, i32i16, NULL,   NULL,   i32u8, i32u16, NULL,   NULL,   i64f32, i64f64, i64f80}, // i64
+    // i8   i16     i32     i64     u8     u16     u32     u64     f32     f64
+    // f80
+    {NULL, NULL, NULL, i32i64, i32u8, i32u16, NULL, i32i64, i32f32, i32f64,
+     i32f80}, // i8
+    {i32i8, NULL, NULL, i32i64, i32u8, i32u16, NULL, i32i64, i32f32, i32f64,
+     i32f80}, // i16
+    {i32i8, i32i16, NULL, i32i64, i32u8, i32u16, NULL, i32i64, i32f32, i32f64,
+     i32f80}, // i32
+    {i32i8, i32i16, NULL, NULL, i32u8, i32u16, NULL, NULL, i64f32, i64f64,
+     i64f80}, // i64
 
-  {i32i8, NULL,   NULL,   i32i64, NULL,  NULL,   NULL,   i32i64, i32f32, i32f64, i32f80}, // u8
-  {i32i8, i32i16, NULL,   i32i64, i32u8, NULL,   NULL,   i32i64, i32f32, i32f64, i32f80}, // u16
-  {i32i8, i32i16, NULL,   u32i64, i32u8, i32u16, NULL,   u32i64, u32f32, u32f64, u32f80}, // u32
-  {i32i8, i32i16, NULL,   NULL,   i32u8, i32u16, NULL,   NULL,   u64f32, u64f64, u64f80}, // u64
+    {i32i8, NULL, NULL, i32i64, NULL, NULL, NULL, i32i64, i32f32, i32f64,
+     i32f80}, // u8
+    {i32i8, i32i16, NULL, i32i64, i32u8, NULL, NULL, i32i64, i32f32, i32f64,
+     i32f80}, // u16
+    {i32i8, i32i16, NULL, u32i64, i32u8, i32u16, NULL, u32i64, u32f32, u32f64,
+     u32f80}, // u32
+    {i32i8, i32i16, NULL, NULL, i32u8, i32u16, NULL, NULL, u64f32, u64f64,
+     u64f80}, // u64
 
-  {f32i8, f32i16, f32i32, f32i64, f32u8, f32u16, f32u32, f32u64, NULL,   f32f64, f32f80}, // f32
-  {f64i8, f64i16, f64i32, f64i64, f64u8, f64u16, f64u32, f64u64, f64f32, NULL,   f64f80}, // f64
-  {f80i8, f80i16, f80i32, f80i64, f80u8, f80u16, f80u32, f80u64, f80f32, f80f64, NULL},   // f80
+    {f32i8, f32i16, f32i32, f32i64, f32u8, f32u16, f32u32, f32u64, NULL, f32f64,
+     f32f80}, // f32
+    {f64i8, f64i16, f64i32, f64i64, f64u8, f64u16, f64u32, f64u64, f64f32, NULL,
+     f64f80}, // f64
+    {f80i8, f80i16, f80i32, f80i64, f80u8, f80u16, f80u32, f80u64, f80f32,
+     f80f64, NULL}, // f80
 };
 
 static void cast(Type *from, Type *to) {
@@ -431,16 +452,13 @@ static bool has_flonum(Type *ty, int lo, int hi, int offset) {
     return true;
   }
 
-  return offset < lo || hi <= offset || ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE;
+  return offset < lo || hi <= offset || ty->kind == TY_FLOAT ||
+         ty->kind == TY_DOUBLE;
 }
 
-static bool has_flonum1(Type *ty) {
-  return has_flonum(ty, 0, 8, 0);
-}
+static bool has_flonum1(Type *ty) { return has_flonum(ty, 0, 8, 0); }
 
-static bool has_flonum2(Type *ty) {
-  return has_flonum(ty, 8, 16, 0);
-}
+static bool has_flonum2(Type *ty) { return has_flonum(ty, 8, 16, 0); }
 
 static void push_struct(Type *ty) {
   int sz = align_to(ty->size, 8);
@@ -458,7 +476,8 @@ static void push_args2(Node *args, bool first_pass) {
     return;
   push_args2(args->next, first_pass);
 
-  if ((first_pass && !args->pass_by_stack) || (!first_pass && args->pass_by_stack))
+  if ((first_pass && !args->pass_by_stack) ||
+      (!first_pass && args->pass_by_stack))
     return;
 
   gen_expr(args);
@@ -690,7 +709,8 @@ static void builtin_alloca(void) {
 
 // Generate code for a given node.
 static void gen_expr(Node *node) {
-  // println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no); //关掉debug信息 
+  // println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
+  // //关掉debug信息
 
   switch (node->kind) {
   case ND_NULL_EXPR:
@@ -698,19 +718,28 @@ static void gen_expr(Node *node) {
   case ND_NUM: {
     switch (node->ty->kind) {
     case TY_FLOAT: {
-      union { float f32; uint32_t u32; } u = { node->fval };
+      union {
+        float f32;
+        uint32_t u32;
+      } u = {node->fval};
       println("  mov $%u, %%eax  # float %Lf", u.u32, node->fval);
       println("  movq %%rax, %%xmm0");
       return;
     }
     case TY_DOUBLE: {
-      union { double f64; uint64_t u64; } u = { node->fval };
+      union {
+        double f64;
+        uint64_t u64;
+      } u = {node->fval};
       println("  mov $%llu, %%rax  # double %Lf", u.u64, node->fval);
       println("  movq %%rax, %%xmm0");
       return;
     }
     case TY_LDOUBLE: {
-      union { long double f80; uint64_t u64[2]; } u;
+      union {
+        long double f80;
+        uint64_t u64[2];
+      } u;
       memset(&u, 0, sizeof(u));
       u.f80 = node->fval;
       println("  mov $%llu, %%rax  # long double %Lf", u.u64[0], node->fval);
@@ -806,7 +835,7 @@ static void gen_expr(Node *node) {
     for (Node *n = node->body; n; n = n->next)
       gen_stmt(n);
     return;
-  case ND_COMMA: // 这里是lhs 置0,  rhs 赋值 
+  case ND_COMMA: // 这里是lhs 置0,  rhs 赋值
     gen_expr(node->lhs);
     gen_expr(node->rhs);
     return;
@@ -888,8 +917,10 @@ static void gen_expr(Node *node) {
 
     // If the return type is a large struct/union, the caller passes
     // a pointer to a buffer as if it were the first argument.
-    if (node->ret_buffer && node->ty->size > 16)
-      pop(argreg64[gp++]);
+    if (node->ret_buffer && node->ty->size > 16) {
+      // pop(argreg64[gp++]);
+      unreachable();
+    }
 
     for (Node *arg = node->args; arg; arg = arg->next) {
       Type *ty = arg->ty;
@@ -906,14 +937,18 @@ static void gen_expr(Node *node) {
         if (fp + fp1 + fp2 < FP_MAX && gp + !fp1 + !fp2 < GP_MAX) {
           if (fp1)
             popf(fp++);
-          else
-            pop(argreg64[gp++]);
+          else {
+            // pop(argreg64[gp++]);
+            unreachable();
+          }
 
           if (ty->size > 8) {
             if (fp2)
               popf(fp++);
-            else
-              pop(argreg64[gp++]);
+            else {
+              // pop(argreg64[gp++]);
+              unreachable();
+            }
           }
         }
         break;
@@ -925,11 +960,13 @@ static void gen_expr(Node *node) {
       case TY_LDOUBLE:
         break;
       default:
-        if (gp < GP_MAX)
-          pop(argreg64[gp++]);
+        if (gp < GP_MAX) {
+          // pop(argreg64[gp++]);
+          unreachable();
+        }
       }
     }
-
+    // 这里固定用r10寄存器会不会出现冲突?
     println("  mov %%rax, %%r10");
     println("  mov $%d, %%rax", fp);
     println("  call *%%r10");
@@ -1186,7 +1223,8 @@ static void gen_expr(Node *node) {
 }
 
 static void gen_stmt(Node *node) {
-  // println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no); //关掉debug信息
+  // println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
+  // //关掉debug信息
 
   switch (node->kind) {
   case ND_IF: {
@@ -1364,13 +1402,14 @@ static void assign_lvar_offsets(Obj *prog) {
       // 16-byte boundaries. See p.14 of
       // https://github.com/hjl-tools/x86-psABI/wiki/x86-64-psABI-draft.pdf.
       int align = (var->ty->kind == TY_ARRAY && var->ty->size >= 16)
-        ? MAX(16, var->align) : var->align;
-
+                      ? MAX(16, var->align)
+                      : var->align;
+      // 这里也会有一些对齐操作.
       bottom += var->ty->size;
       bottom = align_to(bottom, align);
       var->offset = -bottom;
     }
-
+    // NOTE 这里栈大小会16对齐.
     fn->stack_size = align_to(bottom, 16);
   }
 }
@@ -1386,7 +1425,8 @@ static void emit_data(Obj *prog) {
       println("  .globl %s", var->name);
 
     int align = (var->ty->kind == TY_ARRAY && var->ty->size >= 16)
-      ? MAX(16, var->align) : var->align;
+                    ? MAX(16, var->align)
+                    : var->align;
 
     // Common symbol
     if (opt_fcommon && var->is_tentative) {
@@ -1432,37 +1472,55 @@ static void emit_data(Obj *prog) {
   }
 }
 
+/**
+ * @brief 利用浮点寄存器去store
+ *
+ * @param r 寄存器编号
+ * @param offset 变量的相对偏移
+ * @param sz 数据位宽
+ */
 static void store_fp(int r, int offset, int sz) {
-  switch (sz) {
-  case 4:
-    println("  movss %%xmm%d, %d(%%rbp)", r, offset);
-    return;
-  case 8:
-    println("  movsd %%xmm%d, %d(%%rbp)", r, offset);
-    return;
-  }
+  // switch (sz) {
+  // case 4:
+  //   println("  movss %%xmm%d, %d(%%rbp)", r, offset);
+  //   return;
+  // case 8:
+  //   println("  movsd %%xmm%d, %d(%%rbp)", r, offset);
+  //   return;
+  // }
   unreachable();
 }
-// 从栈中加载数据到通用寄存器中, 这里是根据size决定不同的arg reg 组. 如果是4 byte那就是argreg32.
+
+/**
+ * @brief 利用通用寄存器去store数据.
+ *
+ * @param r 寄存器编号
+ * @param offset 变量的相对偏移
+ * @param sz 数据位宽
+ */
 static void store_gp(int r, int offset, int sz) {
   switch (sz) {
   case 1:
-    println("  mov %s, %d(%%rbp)", argreg8[r], offset);
+    // println("  mov %s, %d(%%rbp)", argreg8[r], offset);
+    unreachable();
     return;
   case 2:
-    println("  mov %s, %d(%%rbp)", argreg16[r], offset);
+    // println("  mov %s, %d(%%rbp)", argreg16[r], offset);
+    unreachable();
     return;
   case 4:
     println("  mov %s, %d(%%rbp)", argreg32[r], offset);
     return;
   case 8:
-    println("  mov %s, %d(%%rbp)", argreg64[r], offset);
+    // println("  mov %s, %d(%%rbp)", argreg64[r], offset);
+    unreachable();
     return;
   default:
-    for (int i = 0; i < sz; i++) {
-      println("  mov %s, %d(%%rbp)", argreg8[r], offset + i);
-      println("  shr $8, %s", argreg64[r]);
-    }
+    // for (int i = 0; i < sz; i++) {
+    //   println("  mov %s, %d(%%rbp)", argreg8[r], offset + i);
+    //   println("  shr $8, %s", argreg64[r]);
+    // }
+    unreachable();
     return;
   }
 }
@@ -1488,49 +1546,53 @@ static void emit_text(Obj *prog) {
     current_fn = fn;
 
     // Prologue
-    println("  push %%rbp"); // 保存老的函数的帧栈
-    println("  mov %%rsp, %%rbp"); // sp指向老的fp的位置
+    println("  push %%rbp");                     // 保存老的函数的帧栈
+    println("  mov %%rsp, %%rbp");               // sp指向老的fp的位置
     println("  sub $%d, %%rsp", fn->stack_size); // 移动sp到当前程序的栈顶
-    println("  mov %%rsp, %d(%%rbp)", fn->alloca_bottom->offset); // ⚠️这里是他特有的的alloca_bottom变量,此时把sp指向alloca_bottom的位置.
+    println("  mov %%rsp, %d(%%rbp)", fn->alloca_bottom->offset);
+    // ⚠️这里他特意添加了一个alloca_bottom变量放到最后,
+    // 因此他的位置就是sp的位置.
 
     // Save arg registers if function is variadic
     if (fn->va_area) {
-      int gp = 0, fp = 0;
-      for (Obj *var = fn->params; var; var = var->next) {
-        if (is_flonum(var->ty))
-          fp++;
-        else
-          gp++;
-      }
+      // int gp = 0, fp = 0;
+      // for (Obj *var = fn->params; var; var = var->next) {
+      //   if (is_flonum(var->ty))
+      //     fp++;
+      //   else
+      //     gp++;
+      // }
 
-      int off = fn->va_area->offset;
+      // int off = fn->va_area->offset;
 
-      // va_elem
-      println("  movl $%d, %d(%%rbp)", gp * 8, off);          // gp_offset
-      println("  movl $%d, %d(%%rbp)", fp * 8 + 48, off + 4); // fp_offset
-      println("  movq %%rbp, %d(%%rbp)", off + 8);            // overflow_arg_area
-      println("  addq $16, %d(%%rbp)", off + 8);
-      println("  movq %%rbp, %d(%%rbp)", off + 16);           // reg_save_area
-      println("  addq $%d, %d(%%rbp)", off + 24, off + 16);
+      // // va_elem
+      // println("  movl $%d, %d(%%rbp)", gp * 8, off);          // gp_offset
+      // println("  movl $%d, %d(%%rbp)", fp * 8 + 48, off + 4); // fp_offset
+      // println("  movq %%rbp, %d(%%rbp)", off + 8); // overflow_arg_area
+      // println("  addq $16, %d(%%rbp)", off + 8);
+      // println("  movq %%rbp, %d(%%rbp)", off + 16); // reg_save_area
+      // println("  addq $%d, %d(%%rbp)", off + 24, off + 16);
 
-      // __reg_save_area__
-      println("  movq %%rdi, %d(%%rbp)", off + 24);
-      println("  movq %%rsi, %d(%%rbp)", off + 32);
-      println("  movq %%rdx, %d(%%rbp)", off + 40);
-      println("  movq %%rcx, %d(%%rbp)", off + 48);
-      println("  movq %%r8, %d(%%rbp)", off + 56);
-      println("  movq %%r9, %d(%%rbp)", off + 64);
-      println("  movsd %%xmm0, %d(%%rbp)", off + 72);
-      println("  movsd %%xmm1, %d(%%rbp)", off + 80);
-      println("  movsd %%xmm2, %d(%%rbp)", off + 88);
-      println("  movsd %%xmm3, %d(%%rbp)", off + 96);
-      println("  movsd %%xmm4, %d(%%rbp)", off + 104);
-      println("  movsd %%xmm5, %d(%%rbp)", off + 112);
-      println("  movsd %%xmm6, %d(%%rbp)", off + 120);
-      println("  movsd %%xmm7, %d(%%rbp)", off + 128);
+      // // __reg_save_area__
+      // println("  movq %%rdi, %d(%%rbp)", off + 24);
+      // println("  movq %%rsi, %d(%%rbp)", off + 32);
+      // println("  movq %%rdx, %d(%%rbp)", off + 40);
+      // println("  movq %%rcx, %d(%%rbp)", off + 48);
+      // println("  movq %%r8, %d(%%rbp)", off + 56);
+      // println("  movq %%r9, %d(%%rbp)", off + 64);
+      // println("  movsd %%xmm0, %d(%%rbp)", off + 72);
+      // println("  movsd %%xmm1, %d(%%rbp)", off + 80);
+      // println("  movsd %%xmm2, %d(%%rbp)", off + 88);
+      // println("  movsd %%xmm3, %d(%%rbp)", off + 96);
+      // println("  movsd %%xmm4, %d(%%rbp)", off + 104);
+      // println("  movsd %%xmm5, %d(%%rbp)", off + 112);
+      // println("  movsd %%xmm6, %d(%%rbp)", off + 120);
+      // println("  movsd %%xmm7, %d(%%rbp)", off + 128);
+      unreachable();
     }
 
-    // Save passed-by-register arguments to the stack 把帧上的内容copy到寄存器上(即寄存器传参)
+    // Save passed-by-register arguments to the stack
+    // 把帧上的内容copy到寄存器上(即寄存器传参)
     int gp = 0, fp = 0;
     for (Obj *var = fn->params; var; var = var->next) {
       if (var->offset > 0)

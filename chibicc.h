@@ -22,7 +22,7 @@
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 #ifndef __GNUC__
-# define __attribute__(x)
+#define __attribute__(x)
 #endif
 
 typedef struct Type Type;
@@ -92,8 +92,10 @@ struct Token {
 };
 
 noreturn void error(char *fmt, ...) __attribute__((format(printf, 1, 2)));
-noreturn void error_at(char *loc, char *fmt, ...) __attribute__((format(printf, 2, 3)));
-noreturn void error_tok(Token *tok, char *fmt, ...) __attribute__((format(printf, 2, 3)));
+noreturn void error_at(char *loc, char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+noreturn void error_tok(Token *tok, char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
 void warn_tok(Token *tok, char *fmt, ...) __attribute__((format(printf, 2, 3)));
 bool equal(Token *tok, char *op);
 Token *skip(Token *tok, char *op);
@@ -105,8 +107,9 @@ Token *tokenize_string_literal(Token *tok, Type *basety);
 Token *tokenize(File *file);
 Token *tokenize_file(char *filename);
 
-#define unreachable() \
-  error("internal error at %s:%d", __FILE__, __LINE__)
+#define unreachable(msg)                                                       \
+  error("internal error at %s/%s:%d , %s", SOURCE_PATH, __FILE__, __LINE__,    \
+        "msg: " msg)
 
 //
 // preprocess.c
@@ -231,8 +234,8 @@ struct Node {
   Type *ty;      // Type, e.g. int or pointer to int
   Token *tok;    // Representative token
 
-  Node *lhs;     // Left-hand side
-  Node *rhs;     // Right-hand side
+  Node *lhs; // Left-hand side
+  Node *rhs; // Right-hand side
 
   // "if" or "for" statement
   Node *cond;
@@ -319,11 +322,11 @@ typedef enum {
 
 struct Type {
   TypeKind kind;
-  int size;           // sizeof() value
-  int align;          // alignment
-  bool is_unsigned;   // unsigned or signed
-  bool is_atomic;     // true if _Atomic
-  Type *origin;       // for type compatibility check
+  int size;         // sizeof() value
+  int align;        // alignment
+  bool is_unsigned; // unsigned or signed
+  bool is_atomic;   // true if _Atomic
+  Type *origin;     // for type compatibility check
 
   // Pointer-to or array-of type. We intentionally use the same member
   // to represent pointer/array duality in C.

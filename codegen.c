@@ -1,14 +1,48 @@
 #include "chibicc.h"
 
 #define GP_MAX 6
-#define FP_MAX 8
+#define FP_MAX 0 // 这里把浮点寄存器的个数改成0.
+#define GP_WIDTH 4
+
+/**
+ * @brief 检查有符号的imm是否超过12位
+ *    NOTE
+ * LUI/AUIPC/ADDI/LW/LH/LHU/LB/LBU/SW/SH/SB/BEQ/BNE/BLT/BLTU/BGE/BGEU/JALR
+ *         以上offset 必须小于12位.
+ * @param value
+ * @return true
+ * @return false
+ */
+static bool is_signed_overflow(int imm, int bits) {
+  if (imm < 0) {
+    // 如果是负数,则判断有效负数的位数小于 bits-1
+    int mask = ~((1 << (bits - 1)) - 1);
+    if (mask == (imm & mask))
+      return false;
+    return true;
+  }
+  // 如果是正数, 当bits为12位, 正数不能超过2048
+  return imm > (1 << (bits - 1));
+}
+
+/**
+ * @brief check imm
+ *
+ * @return int
+ */
+int check_imm(imm, bits) {
+  if (is_signed_overflow(imm, bits))
+    unreachable();
+  return (imm);
+}
 
 static FILE *output_file;
 static int depth;
 // static char *argreg8[] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
 // static char *argreg16[] = {"%di", "%si", "%dx", "%cx", "%r8w", "%r9w"};
-static char *argreg32[] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
+// static char *argreg32[] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
 // static char *argreg64[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+static char *argreg32[] = {"R.rdi", "R.rsi", "R.rdx", "R.rcx", "R.r8", "R.r9"};
 static Obj *current_fn;
 
 static void gen_expr(Node *node);
@@ -27,56 +61,161 @@ static int count(void) {
   return i++;
 }
 
-static void push(void) {
-  println("  push %%rax");
+/**
+ * @brief 默认push是rax
+ *
+ */
+static void push() {
+  println("  I.ADDI(R.rsp,R.rsp,-4)");
+  println("  I.SW(R.rsp,%s,0)", "R.rax");
   depth++;
 }
 
-static void pop(char *arg) {
-  println("  pop %s", arg);
+/**
+ * @brief push 一个寄存器
+ *
+ * @param rs 源寄存器.
+ */
+static void push_reg(char *rs) {
+  println("  I.ADDI(R.rsp,R.rsp,-4)");
+  println("  I.SW(R.rsp,%s,0)", rs);
+}
+
+static void pop(char *rd) {
+  println("  I.LW(%s,R.rsp,0)", rd);
+  println("  I.ADDI(R.rsp,R.rsp,4)");
   depth--;
+}
+
+/**
+ * @brief 加载立即数到指定寄存器
+ *
+ * @param rd
+ * @param imm
+ */
+static void load_imm(char *rd, int imm) {
+  if (is_signed_overflow(imm, 12)) {
+    uint32_t high_bit = ((imm >> 12) + ((imm >> 11) & 0x1)) & 0xfffff;
+    uint32_t low_bit = imm & 0x00000fff;
+    println("  I.LUI(%s, %d)", rd, high_bit);
+    println("  I.ADDI(%s, %s, %d)", rd, rd, low_bit);
+  } else {
+    println("  I.LUI(%s, %d)", rd, imm);
+  }
+}
+
+/**
+ * @brief 加载uint imm到模型中.
+ *
+ * @param rd
+ * @param imm
+ */
+static void load_uimm(char *rd, uint32_t imm) {
+  if (imm > ((1 << 12) - 1)) {
+    uint32_t high_bit = ((imm >> 12) + ((imm >> 11) & 0x1)) & 0xfffff;
+    uint32_t low_bit = imm & 0x00000fff;
+    println("  I.LUI(%s, %d)", rd, high_bit);
+    println("  I.ADDI(%s, %s, %d)", rd, rd, low_bit);
+  } else {
+    println("  I.LUI(%s, %d)", rd, imm);
+  }
+}
+
+/**
+ * @brief lea 是从源寄存器中取数和偏移, 存到新寄存器中
+ *      NOTE 源寄存器中的内容请保证为有效地址.
+ * @param rd
+ * @param rs
+ * @param offset
+ */
+static void lea(char *rd, char *rs, int offset) {
+  if (is_signed_overflow(offset, 12)) {
+    unreachable();
+  }
+  println("  I.ADDI(%s,%s,%d)", rd, rs, offset);
+}
+
+/**
+ * @brief 加载symbol的text地址.到目标寄存器,
+ * @param rd
+ * @param offset
+ */
+static void lea_symobl(char *rd, char *symbol_name) {
+  // AUIPC(GP_REGISTER rd, Expr imm)
+  println("  I.AUIPC(%s, %d)", rd, 4);               // 这里手动加4
+  println("  I.ADDI(%s,R.r0,@%s)", rd, symbol_name); // 这里用汇编器取填值
+}
+
+static void addi(char *rd, int offset) {
+  // 这里用汇编器取填值
+  println("  I.ADDI(%s,R.r0,%d)", rd, check_imm(offset, 12));
+}
+
+/**
+ * @brief 从源寄存器内容加偏移的结果地址 加载数据到 目标寄存器
+ *
+ * @param rd
+ * @param rs
+ * @param offset
+ */
+static void mov(char *rd, char *rs, int offset) {
+  println("  I.LW(%s,%s,%d)", rd, rs, check_imm(offset, 12));
 }
 
 static void pushf(void) {
-  println("  sub $8, %%rsp");
-  println("  movsd %%xmm0, (%%rsp)");
-  depth++;
+  // println("  sub $8, %%rsp");
+  // println("  movsd %%xmm0, (%%rsp)");
+  // depth++;
+  unreachable();
 }
 
 static void popf(int reg) {
-  println("  movsd (%%rsp), %%xmm%d", reg);
-  println("  add $8, %%rsp");
-  depth--;
+  // println("  movsd (%%rsp), %%xmm%d", reg);
+  // println("  add $8, %%rsp");
+  // depth--;
+  unreachable();
 }
 
 // Round up `n` to the nearest multiple of `align`. For instance,
 // align_to(5, 8) returns 8 and align_to(11, 8) returns 16.
 int align_to(int n, int align) { return (n + align - 1) / align * align; }
 
+/**
+ * @brief 根据size获取dx
+ *
+ * @param sz
+ * @return char*
+ */
 static char *reg_dx(int sz) {
   switch (sz) {
-  case 1:
-    return "%dl";
-  case 2:
-    return "%dx";
-  case 4:
-    return "%edx";
+  // case 1:
+  //   return "%dl";
+  // case 2:
+  //   return "%dx";
+  // case 4:
+  //   return "%edx";
   case 8:
-    return "%rdx";
+    return "R.rdx";
   }
   unreachable();
 }
 
+/**
+ * @brief 根据size获取对应的目标寄存器
+ *
+ * @param sz
+ * @return char*
+ */
 static char *reg_ax(int sz) {
   switch (sz) {
-  case 1:
-    return "%al";
-  case 2:
-    return "%ax";
-  case 4:
-    return "%eax";
+  // case 1:
+  //   return "%al";
+  // case 2:
+  //   return "%ax";
+  // case 4:
+  //   return "%eax";
   case 8:
-    return "%rax";
+    return "R.rax";
   }
   unreachable();
 }
@@ -88,13 +227,15 @@ static void gen_addr(Node *node) {
   case ND_VAR:
     // Variable-length array, which is always local.
     if (node->var->ty->kind == TY_VLA) {
-      println("  mov %d(%%rbp), %%rax", node->var->offset);
+      // println("  mov %d(%%rbp), %%rax", node->var->offset);
+      mov("R.rax", "R.rbp", node->var->offset);
       return;
     }
 
     // Local variable
     if (node->var->is_local) {
-      println("  lea %d(%%rbp), %%rax", node->var->offset);
+      // println("  lea %d(%%rbp), %%rax", node->var->offset);
+      lea("R.rax", "R.rbp", node->var->offset);
       return;
     }
 
@@ -148,7 +289,8 @@ static void gen_addr(Node *node) {
     // Function
     if (node->ty->kind == TY_FUNC) {
       if (node->var->is_definition) {
-        println("  lea %s(%%rip), %%rax", node->var->name);
+        // println("  lea %s(%%rip), %%rax", node->var->name);
+        lea_symobl("R.rax", node->var->name);
       } else {
         // println("  mov %s@GOTPCREL(%%rip), %%rax", node->var->name);
         unreachable(); // 暂时不支持调用动态链接
@@ -157,7 +299,8 @@ static void gen_addr(Node *node) {
     }
 
     // Global variable
-    println("  lea %s(%%rip), %%rax", node->var->name);
+    // println("  lea %s(%%rip), %%rax", node->var->name);
+    lea_symobl("R.rax", node->var->name);
     return;
   case ND_DEREF:
     gen_expr(node->lhs);
@@ -168,7 +311,8 @@ static void gen_addr(Node *node) {
     return;
   case ND_MEMBER:
     gen_addr(node->lhs);
-    println("  add $%d, %%rax", node->member->offset);
+    // println("  add $%d, %%rax", node->member->offset);
+    addi("R.rax", node->member->offset);
     return;
   case ND_FUNCALL:
     if (node->ret_buffer) {
@@ -184,7 +328,8 @@ static void gen_addr(Node *node) {
     }
     break;
   case ND_VLA_PTR:
-    println("  lea %d(%%rbp), %%rax", node->var->offset);
+    // println("  lea %d(%%rbp), %%rax", node->var->offset);
+    lea("R.rax", "R.rbp", node->var->offset);
     return;
   }
 
@@ -207,17 +352,20 @@ static void load(Type *ty) {
     // the first element of the array in C" occurs.
     return;
   case TY_FLOAT:
-    println("  movss (%%rax), %%xmm0");
+    // println("  movss (%%rax), %%xmm0");
+    unreachable();
     return;
   case TY_DOUBLE:
-    println("  movsd (%%rax), %%xmm0");
+    // println("  movsd (%%rax), %%xmm0");
+    unreachable();
     return;
   case TY_LDOUBLE:
-    println("  fldt (%%rax)");
+    // println("  fldt (%%rax)");
+    unreachable();
     return;
   }
 
-  char *insn = ty->is_unsigned ? "movz" : "movs";
+  // char *insn = ty->is_unsigned ? "movz" : "movs";
 
   // When we load a char or a short value to a register, we always
   // extend them to the size of int, so we can assume the lower half of
@@ -225,62 +373,80 @@ static void load(Type *ty) {
   // register for char, short and int may contain garbage. When we load
   // a long value to a register, it simply occupies the entire register.
   if (ty->size == 1)
-    println("  %sbl (%%rax), %%eax", insn);
+    // println("  %sbl (%%rax), %%eax", insn);
+    unreachable();
   else if (ty->size == 2)
-    println("  %swl (%%rax), %%eax", insn);
+    // println("  %swl (%%rax), %%eax", insn);
+    unreachable();
   else if (ty->size == 4)
-    println("  movsxd (%%rax), %%rax");
+    // println("  movsxd (%%rax), %%rax");
+    println("  I.LW(%s,%s,0)", "R.rax", "R.rax");
   else
-    println("  mov (%%rax), %%rax");
+    // println("  mov (%%rax), %%rax");
+    println("  I.LW(%s,%s,0)", "R.rax", "R.rax");
 }
 
 // Store %rax to an address that the stack top is pointing to.
 static void store(Type *ty) {
-  pop("%rdi");
+  // pop("%rdi");
+  pop("R.rdi");
 
   switch (ty->kind) {
   case TY_STRUCT:
   case TY_UNION:
     for (int i = 0; i < ty->size; i++) {
-      println("  mov %d(%%rax), %%r8b", i);
-      println("  mov %%r8b, %d(%%rdi)", i);
+      // println("  mov %d(%%rax), %%r8b", i);
+      // println("  mov %%r8b, %d(%%rdi)", i);
+      // 从rax加载数据到寄存器,再store到 rdi指向的地址
+      println("  I.LBU(%s,%s,%d)", "R.r8", "R.rax", i);
+      println("  I.SB(%s,%s,%d)", "R.rdi", "R.r8", i);
     }
     return;
   case TY_FLOAT:
-    println("  movss %%xmm0, (%%rdi)");
+    // println("  movss %%xmm0, (%%rdi)");
+    unreachable();
     return;
   case TY_DOUBLE:
-    println("  movsd %%xmm0, (%%rdi)");
+    // println("  movsd %%xmm0, (%%rdi)");
+    unreachable();
     return;
   case TY_LDOUBLE:
-    println("  fstpt (%%rdi)");
+    // println("  fstpt (%%rdi)");
+    unreachable();
     return;
   }
 
   if (ty->size == 1)
-    println("  mov %%al, (%%rdi)");
+    // println("  mov %%al, (%%rdi)");
+    println("  I.SB(R.rdi,R.rax,0)");
   else if (ty->size == 2)
-    println("  mov %%ax, (%%rdi)");
+    // println("  mov %%ax, (%%rdi)");
+    println("  I.SH(R.rdi,R.rax,0)");
   else if (ty->size == 4)
-    println("  mov %%eax, (%%rdi)");
+    // println("  mov %%eax, (%%rdi)");
+    println("  I.SW(R.rdi,R.rax,0)");
   else
-    println("  mov %%rax, (%%rdi)");
+    // println("  mov %%rax, (%%rdi)");
+    unreachable("最大32位");
 }
 
 static void cmp_zero(Type *ty) {
   switch (ty->kind) {
   case TY_FLOAT:
-    println("  xorps %%xmm1, %%xmm1");
-    println("  ucomiss %%xmm1, %%xmm0");
+    // println("  xorps %%xmm1, %%xmm1");
+    // println("  ucomiss %%xmm1, %%xmm0");
+    unreachable();
     return;
   case TY_DOUBLE:
-    println("  xorpd %%xmm1, %%xmm1");
-    println("  ucomisd %%xmm1, %%xmm0");
+    // println("  xorpd %%xmm1, %%xmm1");
+    // println("  ucomisd %%xmm1, %%xmm0");
+    unreachable();
     return;
   case TY_LDOUBLE:
-    println("  fldz");
-    println("  fucomip");
-    println("  fstp %%st(0)");
+    // println("  fldz");
+    // println("  fucomip");
+    // println("  fstp %%st(0)");
+    unreachable();
     return;
   }
 
@@ -379,34 +545,24 @@ static char f80u64[] = FROM_F80_1 "fistpq" FROM_F80_2 "mov -24(%rsp), %rax";
 static char f80f32[] = "fstps -8(%rsp); movss -8(%rsp), %xmm0";
 static char f80f64[] = "fstpl -8(%rsp); movsd -8(%rsp), %xmm0";
 
+// clang-format off
 static char *cast_table[][11] = {
-    // i8   i16     i32     i64     u8     u16     u32     u64     f32     f64
-    // f80
-    {NULL, NULL, NULL, i32i64, i32u8, i32u16, NULL, i32i64, i32f32, i32f64,
-     i32f80}, // i8
-    {i32i8, NULL, NULL, i32i64, i32u8, i32u16, NULL, i32i64, i32f32, i32f64,
-     i32f80}, // i16
-    {i32i8, i32i16, NULL, i32i64, i32u8, i32u16, NULL, i32i64, i32f32, i32f64,
-     i32f80}, // i32
-    {i32i8, i32i16, NULL, NULL, i32u8, i32u16, NULL, NULL, i64f32, i64f64,
-     i64f80}, // i64
+  // i8   i16     i32     i64     u8     u16     u32     u64     f32     f64     f80
+  {NULL,  NULL,   NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i8
+  {i32i8, NULL,   NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i16
+  {i32i8, i32i16, NULL,   i32i64, i32u8, i32u16, NULL,   i32i64, i32f32, i32f64, i32f80}, // i32
+  {i32i8, i32i16, NULL,   NULL,   i32u8, i32u16, NULL,   NULL,   i64f32, i64f64, i64f80}, // i64
 
-    {i32i8, NULL, NULL, i32i64, NULL, NULL, NULL, i32i64, i32f32, i32f64,
-     i32f80}, // u8
-    {i32i8, i32i16, NULL, i32i64, i32u8, NULL, NULL, i32i64, i32f32, i32f64,
-     i32f80}, // u16
-    {i32i8, i32i16, NULL, u32i64, i32u8, i32u16, NULL, u32i64, u32f32, u32f64,
-     u32f80}, // u32
-    {i32i8, i32i16, NULL, NULL, i32u8, i32u16, NULL, NULL, u64f32, u64f64,
-     u64f80}, // u64
+  {i32i8, NULL,   NULL,   i32i64, NULL,  NULL,   NULL,   i32i64, i32f32, i32f64, i32f80}, // u8
+  {i32i8, i32i16, NULL,   i32i64, i32u8, NULL,   NULL,   i32i64, i32f32, i32f64, i32f80}, // u16
+  {i32i8, i32i16, NULL,   u32i64, i32u8, i32u16, NULL,   u32i64, u32f32, u32f64, u32f80}, // u32
+  {i32i8, i32i16, NULL,   NULL,   i32u8, i32u16, NULL,   NULL,   u64f32, u64f64, u64f80}, // u64
 
-    {f32i8, f32i16, f32i32, f32i64, f32u8, f32u16, f32u32, f32u64, NULL, f32f64,
-     f32f80}, // f32
-    {f64i8, f64i16, f64i32, f64i64, f64u8, f64u16, f64u32, f64u64, f64f32, NULL,
-     f64f80}, // f64
-    {f80i8, f80i16, f80i32, f80i64, f80u8, f80u16, f80u32, f80u64, f80f32,
-     f80f64, NULL}, // f80
+  {f32i8, f32i16, f32i32, f32i64, f32u8, f32u16, f32u32, f32u64, NULL,   f32f64, f32f80}, // f32
+  {f64i8, f64i16, f64i32, f64i64, f64u8, f64u16, f64u32, f64u64, f64f32, NULL,   f64f80}, // f64
+  {f80i8, f80i16, f80i32, f80i64, f80u8, f80u16, f80u32, f80u64, f80f32, f80f64, NULL},   // f80
 };
+// clang-format on
 
 static void cast(Type *from, Type *to) {
   if (to->kind == TY_VOID)
@@ -425,18 +581,24 @@ static void cast(Type *from, Type *to) {
     println("  %s", cast_table[t1][t2]);
 }
 
-// Structs or unions equal or smaller than 16 bytes are passed
-// using up to two registers.
-//
-// If the first 8 bytes contains only floating-point type members,
-// they are passed in an XMM register. Otherwise, they are passed
-// in a general-purpose register.
-//
-// If a struct/union is larger than 8 bytes, the same rule is
-// applied to the the next 8 byte chunk.
-//
-// This function returns true if `ty` has only floating-point
-// members in its byte range [lo, hi).
+/**
+ * @brief
+ *   Structs or unions equal or smaller than 16 bytes are passed using up to two
+ * registers.
+ *   If the first 8 bytes contains only floating-point type members, they are
+ * passed in an XMM register.
+ *   Otherwise, they are passed in a general-purpose register.
+ * If a struct/union is larger than 8 bytes, the same rule is applied
+ * to the the next 8 byte chunk.
+ *   This function returns true if `ty` has only
+ * floating-point members in its byte range [lo, hi).
+ * @param ty
+ * @param lo
+ * @param hi
+ * @param offset
+ * @return true
+ * @return false
+ */
 static bool has_flonum(Type *ty, int lo, int hi, int offset) {
   if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
     for (Member *mem = ty->members; mem; mem = mem->next)
@@ -456,26 +618,38 @@ static bool has_flonum(Type *ty, int lo, int hi, int offset) {
          ty->kind == TY_DOUBLE;
 }
 
-static bool has_flonum1(Type *ty) { return has_flonum(ty, 0, 8, 0); }
+static bool has_flonum1(Type *ty) { return has_flonum(ty, 0, 4, 0); }
 
-static bool has_flonum2(Type *ty) { return has_flonum(ty, 8, 16, 0); }
+static bool has_flonum2(Type *ty) { return has_flonum(ty, 4, 8, 0); }
 
 static void push_struct(Type *ty) {
-  int sz = align_to(ty->size, 8);
-  println("  sub $%d, %%rsp", sz);
-  depth += sz / 8;
+  int sz = align_to(ty->size, 4);
+  // println("  sub $%d, %%rsp", sz);
+  println("  I.ADDI(R.rsp,R.r0, %d)", -sz); // 下移rsp
+  depth += sz / 4;
 
+  // 然后一个一个byte向上写入
   for (int i = 0; i < ty->size; i++) {
-    println("  mov %d(%%rax), %%r10b", i);
-    println("  mov %%r10b, %d(%%rsp)", i);
+    // println("  mov %d(%%rax), %%r10b", i);
+    // println("  mov %%r10b, %d(%%rsp)", i);
+    println("  I.LBU(R.r10,R.rax,%d)", i);
+    println("  I.SB(R.rsp,R.r10,%d)", i);
   }
 }
 
+/**
+ * @brief 根据之前处理的结果继续push参数
+ *
+ * @param args 参数节点.
+ * @param first_pass 是否是第一次
+ */
 static void push_args2(Node *args, bool first_pass) {
   if (!args)
     return;
+  // 递归的push,也就是最终顺序为 args1 .. args n
   push_args2(args->next, first_pass);
 
+  //如果不是通过栈传值就pass.
   if ((first_pass && !args->pass_by_stack) ||
       (!first_pass && args->pass_by_stack))
     return;
@@ -492,34 +666,43 @@ static void push_args2(Node *args, bool first_pass) {
     pushf();
     break;
   case TY_LDOUBLE:
-    println("  sub $16, %%rsp");
-    println("  fstpt (%%rsp)");
-    depth += 2;
+    // println("  sub $16, %%rsp");
+    // println("  fstpt (%%rsp)");
+    // depth += 2;
+    unreachable();
+    break;
+  case TY_LONG:
+    unreachable();
     break;
   default:
     push();
   }
 }
 
-// Load function call arguments. Arguments are already evaluated and
-// stored to the stack as local variables. What we need to do in this
-// function is to load them to registers or push them to the stack as
-// specified by the x86-64 psABI. Here is what the spec says:
-//
-// - Up to 6 arguments of integral type are passed using RDI, RSI,
-//   RDX, RCX, R8 and R9.
-//
-// - Up to 8 arguments of floating-point type are passed using XMM0 to
-//   XMM7.
-//
-// - If all registers of an appropriate type are already used, push an
-//   argument to the stack in the right-to-left order.
-//
-// - Each argument passed on the stack takes 8 bytes, and the end of
-//   the argument area must be aligned to a 16 byte boundary.
-//
-// - If a function is variadic, set the number of floating-point type
-//   arguments to RAX.
+/**
+ * @brief  Load function call arguments. Arguments are already evaluated and
+ * stored to the stack as local variables. What we need to do in this
+ * function is to load them to registers or push them to the stack as
+ * specified by the x86-64 psABI. Here is what the spec says:
+ *
+ * - Up to 6 arguments of integral type are passed using RDI, RSI,
+ *   RDX, RCX, R8 and R9.
+ *
+ * - Up to 8 arguments of floating-point type are passed using XMM0 to
+ *   XMM7.
+ *
+ * - If all registers of an appropriate type are already used, push an
+ *   argument to the stack in the right-to-left order.
+ *
+ * - Each argument passed on the stack takes 8 bytes, and the end of
+ *   the argument area must be aligned to a 16 byte boundary.
+ *
+ * - If a function is variadic, set the number of floating-point type
+ *   arguments to RAX.
+ * NOTE 这里我限制浮点数/变长参数
+ * @param node
+ * @return int
+ */
 static int push_args(Node *node) {
   int stack = 0, gp = 0, fp = 0;
 
@@ -535,9 +718,9 @@ static int push_args(Node *node) {
     switch (ty->kind) {
     case TY_STRUCT:
     case TY_UNION:
-      if (ty->size > 16) {
+      if (ty->size > 8) { // 大于8用栈传值.
         arg->pass_by_stack = true;
-        stack += align_to(ty->size, 8) / 8;
+        stack += align_to(ty->size, 4) / 4;
       } else {
         bool fp1 = has_flonum1(ty);
         bool fp2 = has_flonum2(ty);
@@ -547,20 +730,25 @@ static int push_args(Node *node) {
           gp = gp + !fp1 + !fp2;
         } else {
           arg->pass_by_stack = true;
-          stack += align_to(ty->size, 8) / 8;
+          stack += align_to(ty->size, 4) / 4;
         }
       }
       break;
     case TY_FLOAT:
     case TY_DOUBLE:
-      if (fp++ >= FP_MAX) {
-        arg->pass_by_stack = true;
-        stack++;
-      }
+      // if (fp++ >= FP_MAX) {
+      //   arg->pass_by_stack = true;
+      //   stack++;
+      // }
+      unreachable();
       break;
     case TY_LDOUBLE:
-      arg->pass_by_stack = true;
-      stack += 2;
+      // arg->pass_by_stack = true;
+      // stack += 2;
+      unreachable();
+      break;
+    case TY_LONG:
+      unreachable();
       break;
     default:
       if (gp++ >= GP_MAX) {
@@ -571,7 +759,8 @@ static int push_args(Node *node) {
   }
 
   if ((depth + stack) % 2 == 1) {
-    println("  sub $8, %%rsp");
+    // println("  sub $8, %%rsp");
+    println("  I.ADDI(R.rsp,%d)", -GP_WIDTH);
     depth++;
     stack++;
   }
@@ -581,8 +770,9 @@ static int push_args(Node *node) {
 
   // If the return type is a large struct/union, the caller passes
   // a pointer to a buffer as if it were the first argument.
-  if (node->ret_buffer && node->ty->size > 16) {
-    println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
+  if (node->ret_buffer && node->ty->size > 2 * GP_WIDTH) {
+    // println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
+    lea("R.rax", "R.rbp", node->ret_buffer->offset);
     push();
   }
 
@@ -626,86 +816,97 @@ static void copy_ret_buffer(Obj *var) {
   }
 }
 
-static void copy_struct_reg(void) {
-  Type *ty = current_fn->ty->return_ty;
-  int gp = 0, fp = 0;
+/**
+ * @brief 通过寄存器传结构体. 先关掉.
+ *
+ */
+// static void copy_struct_reg(void) {
+//   Type *ty = current_fn->ty->return_ty;
+//   int gp = 0, fp = 0;
 
-  println("  mov %%rax, %%rdi");
+//   println("  mov %%rax, %%rdi");
 
-  if (has_flonum(ty, 0, 8, 0)) {
-    assert(ty->size == 4 || 8 <= ty->size);
-    if (ty->size == 4)
-      println("  movss (%%rdi), %%xmm0");
-    else
-      println("  movsd (%%rdi), %%xmm0");
-    fp++;
-  } else {
-    println("  mov $0, %%rax");
-    for (int i = MIN(8, ty->size) - 1; i >= 0; i--) {
-      println("  shl $8, %%rax");
-      println("  mov %d(%%rdi), %%al", i);
-    }
-    gp++;
-  }
+//   if (has_flonum(ty, 0, 8, 0)) {
+//     assert(ty->size == 4 || 8 <= ty->size);
+//     if (ty->size == 4)
+//       println("  movss (%%rdi), %%xmm0");
+//     else
+//       println("  movsd (%%rdi), %%xmm0");
+//     fp++;
+//   } else {
+//     println("  mov $0, %%rax");
+//     // 他这里是每次load 8bit到rax中的al 然后左移. 这里用乘法来模拟
+//     for (int i = MIN(4, ty->size) - 1; i >= 0; i--) {
+//       println("  shl $8, %%rax");
+//       println("  mov %d(%%rdi), %%al", i);
+//     }
+//     gp++;
+//   }
 
-  if (ty->size > 8) {
-    if (has_flonum(ty, 8, 16, 0)) {
-      assert(ty->size == 12 || ty->size == 16);
-      if (ty->size == 4)
-        println("  movss 8(%%rdi), %%xmm%d", fp);
-      else
-        println("  movsd 8(%%rdi), %%xmm%d", fp);
-    } else {
-      char *reg1 = (gp == 0) ? "%al" : "%dl";
-      char *reg2 = (gp == 0) ? "%rax" : "%rdx";
-      println("  mov $0, %s", reg2);
-      for (int i = MIN(16, ty->size) - 1; i >= 8; i--) {
-        println("  shl $8, %s", reg2);
-        println("  mov %d(%%rdi), %s", i, reg1);
-      }
-    }
-  }
-}
+//   if (ty->size > 8) {
+//     if (has_flonum(ty, 8, 16, 0)) {
+//       assert(ty->size == 12 || ty->size == 16);
+//       if (ty->size == 4)
+//         println("  movss 8(%%rdi), %%xmm%d", fp);
+//       else
+//         println("  movsd 8(%%rdi), %%xmm%d", fp);
+//     } else {
+//       char *reg1 = (gp == 0) ? "%al" : "%dl";
+//       char *reg2 = (gp == 0) ? "%rax" : "%rdx";
+//       println("  mov $0, %s", reg2);
+//       for (int i = MIN(16, ty->size) - 1; i >= 8; i--) {
+//         println("  shl $8, %s", reg2);
+//         println("  mov %d(%%rdi), %s", i, reg1);
+//       }
+//     }
+//   }
+// }
 
 static void copy_struct_mem(void) {
   Type *ty = current_fn->ty->return_ty;
   Obj *var = current_fn->params;
 
-  println("  mov %d(%%rbp), %%rdi", var->offset);
+  // println("  mov %d(%%rbp), %%rdi", var->offset);
+  if (is_signed_overflow(var->offset, 12)) {
+    unreachable();
+  }
+  println("  I.LW(R.rdi, R.rbp, %d)", var->offset);
 
   for (int i = 0; i < ty->size; i++) {
-    println("  mov %d(%%rax), %%dl", i);
-    println("  mov %%dl, %d(%%rdi)", i);
+    // println("  mov %d(%%rax), %%dl", i);
+    // println("  mov %%dl, %d(%%rdi)", i);
+    println("  I.LBU(R.r12,R.rax,%d)", i);
+    println("  I.SB(R.rdi,R.r12,%d)", i);
   }
 }
 
-static void builtin_alloca(void) {
-  // Align size to 16 bytes.
-  println("  add $15, %%rdi");
-  println("  and $0xfffffff0, %%edi");
+// static void builtin_alloca(void) {
+//   // Align size to 16 bytes.
+//   println("  add $15, %%rdi");
+//   println("  and $0xfffffff0, %%edi");
 
-  // Shift the temporary area by %rdi.
-  println("  mov %d(%%rbp), %%rcx", current_fn->alloca_bottom->offset);
-  println("  sub %%rsp, %%rcx");
-  println("  mov %%rsp, %%rax");
-  println("  sub %%rdi, %%rsp");
-  println("  mov %%rsp, %%rdx");
-  println("1:");
-  println("  cmp $0, %%rcx");
-  println("  je 2f");
-  println("  mov (%%rax), %%r8b");
-  println("  mov %%r8b, (%%rdx)");
-  println("  inc %%rdx");
-  println("  inc %%rax");
-  println("  dec %%rcx");
-  println("  jmp 1b");
-  println("2:");
+//   // Shift the temporary area by %rdi.
+//   println("  mov %d(%%rbp), %%rcx", current_fn->alloca_bottom->offset);
+//   println("  sub %%rsp, %%rcx");
+//   println("  mov %%rsp, %%rax");
+//   println("  sub %%rdi, %%rsp");
+//   println("  mov %%rsp, %%rdx");
+//   println("1:");
+//   println("  cmp $0, %%rcx");
+//   println("  je 2f");
+//   println("  mov (%%rax), %%r8b");
+//   println("  mov %%r8b, (%%rdx)");
+//   println("  inc %%rdx");
+//   println("  inc %%rax");
+//   println("  dec %%rcx");
+//   println("  jmp 1b");
+//   println("2:");
 
-  // Move alloca_bottom pointer.
-  println("  mov %d(%%rbp), %%rax", current_fn->alloca_bottom->offset);
-  println("  sub %%rdi, %%rax");
-  println("  mov %%rax, %d(%%rbp)", current_fn->alloca_bottom->offset);
-}
+//   // Move alloca_bottom pointer.
+//   println("  mov %d(%%rbp), %%rax", current_fn->alloca_bottom->offset);
+//   println("  sub %%rdi, %%rax");
+//   println("  mov %%rax, %d(%%rbp)", current_fn->alloca_bottom->offset);
+// }
 
 // Generate code for a given node.
 static void gen_expr(Node *node) {
@@ -718,40 +919,57 @@ static void gen_expr(Node *node) {
   case ND_NUM: {
     switch (node->ty->kind) {
     case TY_FLOAT: {
-      union {
-        float f32;
-        uint32_t u32;
-      } u = {node->fval};
-      println("  mov $%u, %%eax  # float %Lf", u.u32, node->fval);
-      println("  movq %%rax, %%xmm0");
-      return;
+      // union {
+      //   float f32;
+      //   uint32_t u32;
+      // } u = {node->fval};
+      // println("  mov $%u, %%eax  # float %Lf", u.u32, node->fval);
+      // println("  movq %%rax, %%xmm0");
+      // return;
+      unreachable();
     }
     case TY_DOUBLE: {
-      union {
-        double f64;
-        uint64_t u64;
-      } u = {node->fval};
-      println("  mov $%llu, %%rax  # double %Lf", u.u64, node->fval);
-      println("  movq %%rax, %%xmm0");
-      return;
+      // union {
+      //   double f64;
+      //   uint64_t u64;
+      // } u = {node->fval};
+      // println("  mov $%llu, %%rax  # double %Lf", u.u64, node->fval);
+      // println("  movq %%rax, %%xmm0");
+      // return;
+      unreachable();
     }
     case TY_LDOUBLE: {
-      union {
-        long double f80;
-        uint64_t u64[2];
-      } u;
-      memset(&u, 0, sizeof(u));
-      u.f80 = node->fval;
-      println("  mov $%llu, %%rax  # long double %Lf", u.u64[0], node->fval);
-      println("  mov %%rax, -16(%%rsp)");
-      println("  mov $%llu, %%rax", u.u64[1]);
-      println("  mov %%rax, -8(%%rsp)");
-      println("  fldt -16(%%rsp)");
-      return;
+      // union {
+      //   long double f80;
+      //   uint64_t u64[2];
+      // } u;
+      // memset(&u, 0, sizeof(u));
+      // u.f80 = node->fval;
+      // println("  mov $%llu, %%rax  # long double %Lf", u.u64[0], node->fval);
+      // println("  mov %%rax, -16(%%rsp)");
+      // println("  mov $%llu, %%rax", u.u64[1]);
+      // println("  mov %%rax, -8(%%rsp)");
+      // println("  fldt -16(%%rsp)");
+      // return;
+      unreachable();
     }
+    case TY_INT: {
+      if (node->ty->is_unsigned) {
+        if (node->ty->is_unsigned && (node->val > UINT32_MAX))
+          unreachable("字面量不能超过uint32");
+        load_uimm("R.rax", node->val);
+      } else {
+        if ((node->val < INT32_MIN || node->val > INT32_MAX))
+          unreachable("字面量不能超过int32");
+        load_imm("R.rax", node->val);
+      }
+      break;
     }
-
-    println("  mov $%lld, %%rax", node->val);
+    default:
+      // bool/ char 等
+      load_imm("R.rax", node->val);
+      break;
+    }
     return;
   }
   case ND_NEG:
@@ -759,23 +977,27 @@ static void gen_expr(Node *node) {
 
     switch (node->ty->kind) {
     case TY_FLOAT:
-      println("  mov $1, %%rax");
-      println("  shl $31, %%rax");
-      println("  movq %%rax, %%xmm1");
-      println("  xorps %%xmm1, %%xmm0");
-      return;
+      // println("  mov $1, %%rax");
+      // println("  shl $31, %%rax");
+      // println("  movq %%rax, %%xmm1");
+      // println("  xorps %%xmm1, %%xmm0");
+      // return;
+      unreachable();
     case TY_DOUBLE:
-      println("  mov $1, %%rax");
-      println("  shl $63, %%rax");
-      println("  movq %%rax, %%xmm1");
-      println("  xorpd %%xmm1, %%xmm0");
-      return;
+      // println("  mov $1, %%rax");
+      // println("  shl $63, %%rax");
+      // println("  movq %%rax, %%xmm1");
+      // println("  xorpd %%xmm1, %%xmm0");
+      // return;
+      unreachable();
     case TY_LDOUBLE:
-      println("  fchs");
-      return;
+      // println("  fchs");
+      // return;
+      unreachable();
     }
 
-    println("  neg %%rax");
+    // println("  neg %%rax");
+    println("  I.SUB(R.rax,R.r0,R.rax)");
     return;
   case ND_VAR:
     gen_addr(node);
@@ -787,11 +1009,12 @@ static void gen_expr(Node *node) {
 
     Member *mem = node->member;
     if (mem->is_bitfield) {
-      println("  shl $%d, %%rax", 64 - mem->bit_width - mem->bit_offset);
-      if (mem->ty->is_unsigned)
-        println("  shr $%d, %%rax", 64 - mem->bit_width);
-      else
-        println("  sar $%d, %%rax", 64 - mem->bit_width);
+      // println("  shl $%d, %%rax", 64 - mem->bit_width - mem->bit_offset);
+      // if (mem->ty->is_unsigned)
+      //   println("  shr $%d, %%rax", 64 - mem->bit_width);
+      // else
+      //   println("  sar $%d, %%rax", 64 - mem->bit_width);
+      unreachable();
     }
     return;
   }
@@ -808,25 +1031,26 @@ static void gen_expr(Node *node) {
     gen_expr(node->rhs);
 
     if (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield) {
-      println("  mov %%rax, %%r8");
+      // println("  mov %%rax, %%r8");
 
-      // If the lhs is a bitfield, we need to read the current value
-      // from memory and merge it with a new value.
-      Member *mem = node->lhs->member;
-      println("  mov %%rax, %%rdi");
-      println("  and $%ld, %%rdi", (1L << mem->bit_width) - 1);
-      println("  shl $%d, %%rdi", mem->bit_offset);
+      // // If the lhs is a bitfield, we need to read the current value
+      // // from memory and merge it with a new value.
+      // Member *mem = node->lhs->member;
+      // println("  mov %%rax, %%rdi");
+      // println("  and $%ld, %%rdi", (1L << mem->bit_width) - 1);
+      // println("  shl $%d, %%rdi", mem->bit_offset);
 
-      println("  mov (%%rsp), %%rax");
-      load(mem->ty);
+      // println("  mov (%%rsp), %%rax");
+      // load(mem->ty);
 
-      long mask = ((1L << mem->bit_width) - 1) << mem->bit_offset;
-      println("  mov $%ld, %%r9", ~mask);
-      println("  and %%r9, %%rax");
-      println("  or %%rdi, %%rax");
-      store(node->ty);
-      println("  mov %%r8, %%rax");
-      return;
+      // long mask = ((1L << mem->bit_width) - 1) << mem->bit_offset;
+      // println("  mov $%ld, %%r9", ~mask);
+      // println("  and %%r9, %%rax");
+      // println("  or %%rdi, %%rax");
+      // store(node->ty);
+      // println("  mov %%r8, %%rax");
+      // return;
+      unreachable();
     }
 
     store(node->ty);
@@ -843,13 +1067,44 @@ static void gen_expr(Node *node) {
     gen_expr(node->lhs);
     cast(node->lhs->ty, node->ty);
     return;
-  case ND_MEMZERO:
+  case ND_MEMZERO: {
     // `rep stosb` is equivalent to `memset(%rdi, %al, %rcx)`.
-    println("  mov $%d, %%rcx", node->var->ty->size); // rcx 保存size信息
-    println("  lea %d(%%rbp), %%rdi", node->var->offset); //
-    println("  mov $0, %%al");
-    println("  rep stosb");
+    // println("  mov $%d, %%rcx", node->var->ty->size); // rcx 保存size信息
+    // println("  lea %d(%%rbp), %%rdi", node->var->offset); //
+    // println("  mov $0, %%al");
+    // println("  rep stosb");
+    uint32_t size = node->var->ty->size;
+    uint32_t word_size = 4;
+    int offset = node->var->offset;
+    while (size) {
+      if (size >= word_size) {
+        char *inst = NULL;
+        switch (word_size) {
+        case 4:
+          inst = "SW";
+          break;
+        case 2:
+          inst = "SH";
+          break;
+        case 1:
+          inst = "SB";
+          break;
+        default:
+          unreachable();
+          break;
+        }
+        if (is_signed_overflow(offset, 12)) {
+          unreachable();
+        }
+        println("  I.%s(R.rbp,R.r0,%d)", inst, offset);
+        size -= word_size;
+        offset -= word_size;
+      } else {
+        word_size /= 2;
+      }
+    }
     return;
+  }
   case ND_COND: {
     int c = count();
     gen_expr(node->cond);
@@ -904,10 +1159,11 @@ static void gen_expr(Node *node) {
   }
   case ND_FUNCALL: {
     if (node->lhs->kind == ND_VAR && !strcmp(node->lhs->var->name, "alloca")) {
-      gen_expr(node->args);
-      println("  mov %%rax, %%rdi");
-      builtin_alloca();
-      return;
+      // gen_expr(node->args);
+      // println("  mov %%rax, %%rdi");
+      // builtin_alloca();
+      // return;
+      unreachable("alloca");
     }
 
     int stack_args = push_args(node);
@@ -960,52 +1216,60 @@ static void gen_expr(Node *node) {
       case TY_LDOUBLE:
         break;
       default:
-        if (gp < GP_MAX) {
+        if (gp < GP_MAX && ty->size <= 4) {
           // pop(argreg64[gp++]);
+          pop(argreg32[gp++]);
+        } else {
           unreachable();
         }
       }
     }
-    // 这里固定用r10寄存器会不会出现冲突?
-    println("  mov %%rax, %%r10");
-    println("  mov $%d, %%rax", fp);
-    println("  call *%%r10");
-    println("  add $%d, %%rsp", stack_args * 8);
+    // 开始函数调用
+    // println("  mov %%rax, %%r10");
+    // println("  mov $%d, %%rax", fp);
+    // println("  call *%%r10");
+    // println("  add $%d, %%rsp", stack_args * 8);
+    println("  I.ADD(R.r10,R.rax,R.r0)");
+    load_imm("R.rax", fp);
+    println("  I.JALR(R.r11,R.r10,0) # pc + 4写入r11"); //
+    println("  I.ADDI(R.rsp, %d)", stack_args * 8);     // rsp 指向
 
     depth -= stack_args;
 
     // It looks like the most significant 48 or 56 bits in RAX may
     // contain garbage if a function return type is short or bool/char,
     // respectively. We clear the upper bits here.
-    switch (node->ty->kind) {
-    case TY_BOOL:
-      println("  movzx %%al, %%eax");
-      return;
-    case TY_CHAR:
-      if (node->ty->is_unsigned)
-        println("  movzbl %%al, %%eax");
-      else
-        println("  movsbl %%al, %%eax");
-      return;
-    case TY_SHORT:
-      if (node->ty->is_unsigned)
-        println("  movzwl %%ax, %%eax");
-      else
-        println("  movswl %%ax, %%eax");
-      return;
-    }
+    // switch (node->ty->kind) {
+    // case TY_BOOL:
+    //   println("  movzx %%al, %%eax");
+    //   return;
+    // case TY_CHAR:
+    //   if (node->ty->is_unsigned)
+    //     println("  movzbl %%al, %%eax");
+    //   else
+    //     println("  movsbl %%al, %%eax");
+    //   return;
+    // case TY_SHORT:
+    //   if (node->ty->is_unsigned)
+    //     println("  movzwl %%ax, %%eax");
+    //   else
+    //     println("  movswl %%ax, %%eax");
+    //   return;
+    // }
 
     // If the return type is a small struct, a value is returned
     // using up to two registers.
-    if (node->ret_buffer && node->ty->size <= 16) {
+    if (node->ret_buffer && node->ty->size <= GP_WIDTH * 2) {
       copy_ret_buffer(node->ret_buffer);
-      println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
+      // println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
+      lea("R.rbp", "R.rax", node->ret_buffer->offset);
     }
 
     return;
   }
   case ND_LABEL_VAL:
-    println("  lea %s(%%rip), %%rax", node->unique_label);
+    // println("  lea %s(%%rip), %%rax", node->unique_label);
+    lea_symobl("R.rax", node->unique_label);
     return;
   case ND_CAS: {
     gen_expr(node->cas_addr);
@@ -1042,145 +1306,159 @@ static void gen_expr(Node *node) {
   switch (node->lhs->ty->kind) {
   case TY_FLOAT:
   case TY_DOUBLE: {
-    gen_expr(node->rhs);
-    pushf();
-    gen_expr(node->lhs);
-    popf(1);
+    // gen_expr(node->rhs);
+    // pushf();
+    // gen_expr(node->lhs);
+    // popf(1);
 
-    char *sz = (node->lhs->ty->kind == TY_FLOAT) ? "ss" : "sd";
+    // char *sz = (node->lhs->ty->kind == TY_FLOAT) ? "ss" : "sd";
 
-    switch (node->kind) {
-    case ND_ADD:
-      println("  add%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_SUB:
-      println("  sub%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_MUL:
-      println("  mul%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_DIV:
-      println("  div%s %%xmm1, %%xmm0", sz);
-      return;
-    case ND_EQ:
-    case ND_NE:
-    case ND_LT:
-    case ND_LE:
-      println("  ucomi%s %%xmm0, %%xmm1", sz);
+    // switch (node->kind) {
+    // case ND_ADD:
+    //   println("  add%s %%xmm1, %%xmm0", sz);
+    //   return;
+    // case ND_SUB:
+    //   println("  sub%s %%xmm1, %%xmm0", sz);
+    //   return;
+    // case ND_MUL:
+    //   println("  mul%s %%xmm1, %%xmm0", sz);
+    //   return;
+    // case ND_DIV:
+    //   println("  div%s %%xmm1, %%xmm0", sz);
+    //   return;
+    // case ND_EQ:
+    // case ND_NE:
+    // case ND_LT:
+    // case ND_LE:
+    //   println("  ucomi%s %%xmm0, %%xmm1", sz);
 
-      if (node->kind == ND_EQ) {
-        println("  sete %%al");
-        println("  setnp %%dl");
-        println("  and %%dl, %%al");
-      } else if (node->kind == ND_NE) {
-        println("  setne %%al");
-        println("  setp %%dl");
-        println("  or %%dl, %%al");
-      } else if (node->kind == ND_LT) {
-        println("  seta %%al");
-      } else {
-        println("  setae %%al");
-      }
+    //   if (node->kind == ND_EQ) {
+    //     println("  sete %%al");
+    //     println("  setnp %%dl");
+    //     println("  and %%dl, %%al");
+    //   } else if (node->kind == ND_NE) {
+    //     println("  setne %%al");
+    //     println("  setp %%dl");
+    //     println("  or %%dl, %%al");
+    //   } else if (node->kind == ND_LT) {
+    //     println("  seta %%al");
+    //   } else {
+    //     println("  setae %%al");
+    //   }
 
-      println("  and $1, %%al");
-      println("  movzb %%al, %%rax");
-      return;
-    }
+    //   println("  and $1, %%al");
+    //   println("  movzb %%al, %%rax");
+    //   return;
+    // }
 
-    error_tok(node->tok, "invalid expression");
+    // error_tok(node->tok, "invalid expression");
+    unreachable("lhs double");
   }
   case TY_LDOUBLE: {
-    gen_expr(node->lhs);
-    gen_expr(node->rhs);
+    // gen_expr(node->lhs);
+    // gen_expr(node->rhs);
 
-    switch (node->kind) {
-    case ND_ADD:
-      println("  faddp");
-      return;
-    case ND_SUB:
-      println("  fsubrp");
-      return;
-    case ND_MUL:
-      println("  fmulp");
-      return;
-    case ND_DIV:
-      println("  fdivrp");
-      return;
-    case ND_EQ:
-    case ND_NE:
-    case ND_LT:
-    case ND_LE:
-      println("  fcomip");
-      println("  fstp %%st(0)");
+    // switch (node->kind) {
+    // case ND_ADD:
+    //   println("  faddp");
+    //   return;
+    // case ND_SUB:
+    //   println("  fsubrp");
+    //   return;
+    // case ND_MUL:
+    //   println("  fmulp");
+    //   return;
+    // case ND_DIV:
+    //   println("  fdivrp");
+    //   return;
+    // case ND_EQ:
+    // case ND_NE:
+    // case ND_LT:
+    // case ND_LE:
+    //   println("  fcomip");
+    //   println("  fstp %%st(0)");
 
-      if (node->kind == ND_EQ)
-        println("  sete %%al");
-      else if (node->kind == ND_NE)
-        println("  setne %%al");
-      else if (node->kind == ND_LT)
-        println("  seta %%al");
-      else
-        println("  setae %%al");
+    //   if (node->kind == ND_EQ)
+    //     println("  sete %%al");
+    //   else if (node->kind == ND_NE)
+    //     println("  setne %%al");
+    //   else if (node->kind == ND_LT)
+    //     println("  seta %%al");
+    //   else
+    //     println("  setae %%al");
 
-      println("  movzb %%al, %%rax");
-      return;
-    }
+    //   println("  movzb %%al, %%rax");
+    //   return;
+    // }
 
-    error_tok(node->tok, "invalid expression");
+    // error_tok(node->tok, "invalid expression");
+    unreachable("lhs long double");
   }
   }
   // 这里是处理一些内置的计算.
   gen_expr(node->rhs);
   push();
   gen_expr(node->lhs);
-  pop("%rdi");
+  pop("R.rdi");
 
-  char *ax, *di, *dx;
+  char *ax, *di;//, *dx;
 
-  if (node->lhs->ty->kind == TY_LONG || node->lhs->ty->base) {
-    ax = "%rax";
-    di = "%rdi";
-    dx = "%rdx";
+  if (node->lhs->ty->kind == TY_INT || node->lhs->ty->base) {
+    ax = "R.rax";
+    di = "R.rdi";
+    // dx = "R.rdx";
   } else {
-    ax = "%eax";
-    di = "%edi";
-    dx = "%edx";
+    // ax = "%eax";
+    // di = "%edi";
+    // dx = "%edx";
+    unreachable();
   }
 
   switch (node->kind) {
   case ND_ADD:
-    println("  add %s, %s", di, ax);
+    // println("  add %s, %s", di, ax);
+    println("  I.ADD(%s,%s,%s)", ax, ax, di);
     return;
   case ND_SUB:
-    println("  sub %s, %s", di, ax);
+    // println("  sub %s, %s", di, ax); ax = ax-di;
+    println("  I.SUB(%s,%s,%s)", ax, ax, di); // d = s1-s2
     return;
   case ND_MUL:
-    println("  imul %s, %s", di, ax);
+    // println("  imul %s, %s", di, ax);
+    println("  I.MUL(%s,%s,%s)", ax, ax, di);
     return;
   case ND_DIV:
   case ND_MOD:
     if (node->ty->is_unsigned) {
-      println("  mov $0, %s", dx);
-      println("  div %s", di);
+      // REMU(GP_REGISTER rd, GP_REGISTER rs1, GP_REGISTER rs2
+      // println("  mov $0, %s", dx);
+      // println("  div %s", di);
+      // d =  s1 / s2
+      println("  I.REMU(%s,%s,%s)", ax, ax, di);
     } else {
       if (node->lhs->ty->size == 8)
-        println("  cqo");
+        // println("  cqo");
+        unreachable();
       else
-        println("  cdq");
-      println("  idiv %s", di);
+        // println("  cdq");
+        println("  I.REM(%s,%s,%s)", ax, ax, di);
     }
-
-    if (node->kind == ND_MOD)
-      println("  mov %%rdx, %%rax");
+    // 这里应该不需要了. x86的应该是除法暂存到一个地方.
+    // if (node->kind == ND_MOD)
+    // println("  mov %%rdx, %%rax");
+    // println("  I.ADD(R.rax,R.rdx,R.r0)");
     return;
   case ND_BITAND:
-    println("  and %s, %s", di, ax);
+    // println("  and %s, %s", di, ax);
+    unreachable();
     return;
   case ND_BITOR:
-    println("  or %s, %s", di, ax);
+    // println("  or %s, %s", di, ax);
+    unreachable();
     return;
   case ND_BITXOR:
-    println("  xor %s, %s", di, ax);
+    // println("  xor %s, %s", di, ax);
+    unreachable();
     return;
   case ND_EQ:
   case ND_NE:
@@ -1224,7 +1502,7 @@ static void gen_expr(Node *node) {
 
 static void gen_stmt(Node *node) {
   // println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
-  // //关掉debug信息
+  // 关掉debug信息
 
   switch (node->kind) {
   case ND_IF: {
@@ -1305,11 +1583,13 @@ static void gen_stmt(Node *node) {
       gen_stmt(n);
     return;
   case ND_GOTO:
-    println("  jmp %s", node->unique_label);
+    // println("  jmp %s", node->unique_label);
+    println("  I.JAL(R.r0, @%s)", node->unique_label);
     return;
   case ND_GOTO_EXPR:
-    gen_expr(node->lhs);
-    println("  jmp *%%rax");
+    unreachable();
+    // gen_expr(node->lhs);
+    // println("  jmp *%%rax");
     return;
   case ND_LABEL:
     println("%s:", node->unique_label);
@@ -1323,15 +1603,17 @@ static void gen_stmt(Node *node) {
       switch (ty->kind) {
       case TY_STRUCT:
       case TY_UNION:
-        if (ty->size <= 16)
-          copy_struct_reg();
-        else
-          copy_struct_mem();
+        // NOTE 因为我们寄存器是32bit, 所以限制寄存器传值小于 8 byte
+        // if (ty->size <= 8)
+        //   copy_struct_reg();
+        // else
+        copy_struct_mem();
         break;
       }
     }
 
-    println("  jmp .L.return.%s", current_fn->name);
+    // println("  jmp .L.return.%s", current_fn->name);
+    println("  I.JAL(R.r0, .L.return.%s)", current_fn->name);
     return;
   case ND_EXPR_STMT:
     gen_expr(node->lhs);
@@ -1499,28 +1781,32 @@ static void store_fp(int r, int offset, int sz) {
  * @param sz 数据位宽
  */
 static void store_gp(int r, int offset, int sz) {
+  if (is_signed_overflow(offset, 12)) {
+    unreachable();
+  }
   switch (sz) {
   case 1:
     // println("  mov %s, %d(%%rbp)", argreg8[r], offset);
-    unreachable();
+    println("  I.SB(R.rbp,%s,%d)", argreg32[r], offset);
     return;
   case 2:
     // println("  mov %s, %d(%%rbp)", argreg16[r], offset);
-    unreachable();
+    println("  I.SH(R.rbp,%s,%d)", argreg32[r], offset);
     return;
   case 4:
-    println("  mov %s, %d(%%rbp)", argreg32[r], offset);
+    // println("  mov %s, %d(%%rbp)", argreg32[r], offset);
+    println("  I.SW(R.rbp,%s,%d)", argreg32[r], offset);
     return;
-  case 8:
-    // println("  mov %s, %d(%%rbp)", argreg64[r], offset);
-    unreachable();
-    return;
+  // case 8:
+  // println("  mov %s, %d(%%rbp)", argreg64[r], offset);
+  //   unreachable();
+  //   return;
   default:
-    // for (int i = 0; i < sz; i++) {
-    //   println("  mov %s, %d(%%rbp)", argreg8[r], offset + i);
-    //   println("  shr $8, %s", argreg64[r]);
-    // }
-    unreachable();
+    for (int i = 0; i < sz; i++) {
+      println("  I.SB(R.rbp,%s,%d)", argreg32[r], offset + i);
+      // println("  mov %s, %d(%%rbp)", argreg32[r], offset + i);
+      // println("  shr $8, %s", argreg64[r]);
+    }
     return;
   }
 }
@@ -1542,16 +1828,32 @@ static void emit_text(Obj *prog) {
 
     println("  .text");
     println("  .type %s, @function", fn->name);
+    if (strcmp(fn->name, "main") == 0) {
+      // main函数开始之前执行一些内容
+      println("gnne_start:");
+
+      load_uimm("R.rax", 0);
+      load_uimm("R.rbx", STACK_SIZE / 32);
+      println("  I.MMU_CONF(R.rax, R.rbx, 0) # 配置程序运行栈为%dkb",
+              STACK_SIZE / 1024);
+      load_uimm("R.rbp", STACK_SIZE - 4);
+      load_uimm("R.rsp", STACK_SIZE - 4);
+    }
     println("%s:", fn->name);
     current_fn = fn;
 
     // Prologue
-    println("  push %%rbp");                     // 保存老的函数的帧栈
-    println("  mov %%rsp, %%rbp");               // sp指向老的fp的位置
-    println("  sub $%d, %%rsp", fn->stack_size); // 移动sp到当前程序的栈顶
-    println("  mov %%rsp, %d(%%rbp)", fn->alloca_bottom->offset);
+    // println("  push %%rbp");                     // 保存老的函数的帧栈
+    // println("  mov %%rsp, %%rbp");               // sp指向老的fp的位置
+    // println("  sub $%d, %%rsp", fn->stack_size); // 移动sp到当前程序的栈顶
+    // println("  mov %%rsp, %d(%%rbp)", fn->alloca_bottom->offset);
     // ⚠️这里他特意添加了一个alloca_bottom变量放到最后,
     // 因此他的位置就是sp的位置.
+    push_reg("R.rbp");
+    println("  I.ADDI(R.rbp,R.rsp,R.r0)");
+    println("  I.ADDI(R.rsp,%d)", check_imm(-fn->stack_size, 12));
+    println("  I.SW(R.rbp,R.r11, %d) # 把ret地址存储到alloca_bottom",
+            check_imm(fn->alloca_bottom->offset, 12));
 
     // Save arg registers if function is variadic
     if (fn->va_area) {
@@ -1633,14 +1935,27 @@ static void emit_text(Obj *prog) {
     // a special rule for the main function. Reaching the end of the
     // main function is equivalent to returning 0, even though the
     // behavior is undefined for the other functions.
-    if (strcmp(fn->name, "main") == 0)
-      println("  mov $0, %%rax");
+    // if (strcmp(fn->name, "main") == 0)
+    //   println("  mov $0, %%rax");
 
     // Epilogue
     println(".L.return.%s:", fn->name);
-    println("  mov %%rbp, %%rsp");
-    println("  pop %%rbp");
-    println("  ret");
+    // println("  mov %%rbp, %%rsp");
+    // println("  pop %%rbp");
+    // println("  ret");
+    if (strcmp(fn->name, "main") == 0) {
+      // main函数跳转到end.
+      println("  I.Fence()");
+      println("  I.END(R.rax)");
+    } else {
+      // 非main函数的return跳转到上一级函数
+      println("  I.LW(R.r11, R.rbp, %d) # 获得返回的pc位置",
+              check_imm(fn->alloca_bottom->offset, 12));
+      println("  I.ADD(R.rsp, R.rbp, R.r0) # rsp指向rbp");
+      println("  I.LW(R.rbp,R.rsp,0) # rbp回退,出栈");
+      println("  I.ADDI(R.rsp,R.rsp,4)");
+      println("  I.JALR(R.r0,R.r11,0) # return");
+    }
   }
 }
 

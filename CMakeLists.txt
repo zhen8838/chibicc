@@ -11,8 +11,12 @@ set(SRC
   tokenize.c
   type.c
   unicode.c
+  codegen.c
 )
 
-add_compile_options(-std=c11 -fno-common -Wall -Wno-switch)
+add_compile_options(-std=c11 -g -fno-common -Wall -Wno-switch)
+
+add_definitions(-DSTACK_SIZE=262144)
+add_definitions(-DSOURCE_PATH=\"/Users/lisa/Documents/chibicc\")
 
 add_executable(chibicc ${SRC})

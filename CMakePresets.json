@@ -3,7 +3,7 @@
   "configurePresets": [
     {
       "name": "debug",
-      "displayName": "Clang 13.0.0 arm64-apple-darwin21.1.0",
+      "displayName": "debug",
       "description": "Using compilers: C = /usr/bin/clang, CXX = /usr/bin/clang++",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "generator": "Unix Makefiles",

@@ -574,8 +574,12 @@ static void cc1(void) {
 }
 
 static void assemble(char *input, char *output) {
-  char *cmd[] = {"as", "-c", input, "-o", output, NULL};
-  run_subprocess(cmd, 6);
+  // char *cmd[] = {
+  //     "dotnet",    "run",
+  //     "--project", SOURCE_PATH "/GModel.Assembler/GModel.Assembler.csproj",
+  //     "--",        input,
+  //     output,      NULL};
+  // run_subprocess(cmd, 8);
 }
 
 static char *find_file(char *pattern) {

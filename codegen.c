@@ -1401,7 +1401,7 @@ static void gen_expr(Node *node) {
   gen_expr(node->lhs);
   pop("R.rdi");
 
-  char *ax, *di;//, *dx;
+  char *ax, *di; //, *dx;
 
   if (node->lhs->ty->kind == TY_INT || node->lhs->ty->base) {
     ax = "R.rax";
@@ -1850,7 +1850,7 @@ static void emit_text(Obj *prog) {
     // ⚠️这里他特意添加了一个alloca_bottom变量放到最后,
     // 因此他的位置就是sp的位置.
     push_reg("R.rbp");
-    println("  I.ADDI(R.rbp,R.rsp,R.r0)");
+    println("  I.ADD(R.rbp,R.rsp,R.r0)");
     println("  I.ADDI(R.rsp,%d)", check_imm(-fn->stack_size, 12));
     println("  I.SW(R.rbp,R.r11, %d) # 把ret地址存储到alloca_bottom",
             check_imm(fn->alloca_bottom->offset, 12));
@@ -1963,9 +1963,9 @@ void codegen(Obj *prog, FILE *out) {
   output_file = out;
 
   File **files = get_input_files();
+  println("  .stack_size %d", STACK_SIZE); // 写入一些信息
   for (int i = 0; files[i]; i++)
     println("  .file %d \"%s\"", files[i]->file_no, files[i]->name);
-
   assign_lvar_offsets(prog);
   emit_data(prog);
   emit_text(prog);

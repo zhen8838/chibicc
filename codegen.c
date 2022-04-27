@@ -67,7 +67,7 @@ static int count(void) {
  */
 static void push() {
   println("  I.ADDI(R.rsp,R.rsp,-4)");
-  println("  I.SW(R.rsp,%s,0)", "R.rax");
+  println("  I.SW(R.rsp,%s,0) # push", "R.rax");
   depth++;
 }
 
@@ -78,12 +78,12 @@ static void push() {
  */
 static void push_reg(char *rs) {
   println("  I.ADDI(R.rsp,R.rsp,-4)");
-  println("  I.SW(R.rsp,%s,0)", rs);
+  println("  I.SW(R.rsp,%s,0) # push", rs);
 }
 
 static void pop(char *rd) {
   println("  I.LW(%s,R.rsp,0)", rd);
-  println("  I.ADDI(R.rsp,R.rsp,4)");
+  println("  I.ADDI(R.rsp,R.rsp,4) # pop");
   depth--;
 }
 
@@ -98,7 +98,7 @@ static void load_imm(char *rd, int imm) {
     uint32_t high_bit = ((imm >> 12) + ((imm >> 11) & 0x1)) & 0xfffff;
     uint32_t low_bit = imm & 0x00000fff;
     println("  I.LUI(%s, %d)", rd, high_bit);
-    println("  I.ADDI(%s, %s, %d)", rd, rd, low_bit);
+    println("  I.ADDI(%s, %s, %d) # overflow load %d", rd, rd, low_bit, imm);
   } else {
     println("  I.LUI(%s, %d)", rd, imm);
   }
@@ -115,7 +115,7 @@ static void load_uimm(char *rd, uint32_t imm) {
     uint32_t high_bit = ((imm >> 12) + ((imm >> 11) & 0x1)) & 0xfffff;
     uint32_t low_bit = imm & 0x00000fff;
     println("  I.LUI(%s, %d)", rd, high_bit);
-    println("  I.ADDI(%s, %s, %d)", rd, rd, low_bit);
+    println("  I.ADDI(%s, %s, %d) # overflow load %d", rd, rd, low_bit, imm);
   } else {
     println("  I.LUI(%s, %d)", rd, imm);
   }
@@ -132,7 +132,7 @@ static void lea(char *rd, char *rs, int offset) {
   if (is_signed_overflow(offset, 12)) {
     unreachable();
   }
-  println("  I.ADDI(%s,%s,%d)", rd, rs, offset);
+  println("  I.ADDI(%s,%s,%d) # lea", rd, rs, offset);
 }
 
 /**
@@ -142,10 +142,19 @@ static void lea(char *rd, char *rs, int offset) {
  */
 static void lea_symobl(char *rd, char *symbol_name) {
   // AUIPC(GP_REGISTER rd, Expr imm)
-  println("  I.AUIPC(%s, %d)", rd, 4);               // 这里手动加4
-  println("  I.ADDI(%s,R.r0,@%s)", rd, symbol_name); // 这里用汇编器取填值
+  // NOTE auipc加载的是高20位. 这里的地址得在汇编器里面重新算一下
+  println("  I.AUIPC(%s, %d)", rd, 0);
+  println("  I.ADDI(%s,%s,8) # pc offset", rd, rd);
+  println("  I.ADDI(%s,%s,@%s) # lea", rd, rd,
+          symbol_name); // 这里用汇编器取填值
 }
 
+/**
+ * @brief 加一个立即数
+ *
+ * @param rd
+ * @param offset
+ */
 static void addi(char *rd, int offset) {
   // 这里用汇编器取填值
   println("  I.ADDI(%s,R.r0,%d)", rd, check_imm(offset, 12));
@@ -625,7 +634,7 @@ static bool has_flonum2(Type *ty) { return has_flonum(ty, 4, 8, 0); }
 static void push_struct(Type *ty) {
   int sz = align_to(ty->size, 4);
   // println("  sub $%d, %%rsp", sz);
-  println("  I.ADDI(R.rsp,R.r0, %d)", -sz); // 下移rsp
+  println("  I.ADDI(R.rsp,R.rsp, %d)", -sz); // 下移rsp
   depth += sz / 4;
 
   // 然后一个一个byte向上写入
@@ -760,7 +769,7 @@ static int push_args(Node *node) {
 
   if ((depth + stack) % 2 == 1) {
     // println("  sub $8, %%rsp");
-    println("  I.ADDI(R.rsp,%d)", -GP_WIDTH);
+    println("  I.ADDI(R.rsp,R.rsp,%d)", -GP_WIDTH);
     depth++;
     stack++;
   }
@@ -1096,7 +1105,7 @@ static void gen_expr(Node *node) {
         if (is_signed_overflow(offset, 12)) {
           unreachable();
         }
-        println("  I.%s(R.rbp,R.r0,%d)", inst, offset);
+        println("  I.%s(R.rbp,R.r0,%d) # memset 0", inst, offset);
         size -= word_size;
         offset -= word_size;
       } else {
@@ -1231,8 +1240,8 @@ static void gen_expr(Node *node) {
     // println("  add $%d, %%rsp", stack_args * 8);
     println("  I.ADD(R.r10,R.rax,R.r0)");
     load_imm("R.rax", fp);
-    println("  I.JALR(R.r11,R.r10,0) # pc + 4写入r11"); //
-    println("  I.ADDI(R.rsp, %d)", stack_args * 8);     // rsp 指向
+    println("  I.JALR(R.r11,R.r10,0) # pc + 4写入r11");             //
+    println("  I.ADDI(R.rsp,R.rsp, %d) # rsp下移", stack_args * 8); // rsp 指向
 
     depth -= stack_args;
 
@@ -1836,8 +1845,8 @@ static void emit_text(Obj *prog) {
       load_uimm("R.rbx", STACK_SIZE / 32);
       println("  I.MMU_CONF(R.rax, R.rbx, 0) # 配置程序运行栈为%dkb",
               STACK_SIZE / 1024);
-      load_uimm("R.rbp", STACK_SIZE - 4);
-      load_uimm("R.rsp", STACK_SIZE - 4);
+      load_uimm("R.rbp", STACK_SIZE);
+      load_uimm("R.rsp", STACK_SIZE);
     }
     println("%s:", fn->name);
     current_fn = fn;
@@ -1851,7 +1860,7 @@ static void emit_text(Obj *prog) {
     // 因此他的位置就是sp的位置.
     push_reg("R.rbp");
     println("  I.ADD(R.rbp,R.rsp,R.r0)");
-    println("  I.ADDI(R.rsp,%d)", check_imm(-fn->stack_size, 12));
+    println("  I.ADDI(R.rsp,R.rsp,%d)", check_imm(-fn->stack_size, 12));
     println("  I.SW(R.rbp,R.r11, %d) # 把ret地址存储到alloca_bottom",
             check_imm(fn->alloca_bottom->offset, 12));
 
@@ -1945,7 +1954,7 @@ static void emit_text(Obj *prog) {
     // println("  ret");
     if (strcmp(fn->name, "main") == 0) {
       // main函数跳转到end.
-      println("  I.Fence()");
+      println("  I.FENCE()");
       println("  I.END(R.rax)");
     } else {
       // 非main函数的return跳转到上一级函数

@@ -21,6 +21,9 @@
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
+// 地址类型的size, 32位cpu为4
+#define ADDR_TYPE_SIZE 4
+
 #ifndef __GNUC__
 #define __attribute__(x)
 #endif

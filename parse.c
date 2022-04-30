@@ -307,7 +307,8 @@ static Obj *new_var(char *name, Type *ty) {
   push_scope(name)->var = var;
   return var;
 }
-// 新构造一个local var, ⚠️这里有个全局的locals变量,每次构造新的local
+// 新构造一个local var,
+// ⚠️这里有个全局的locals变量,每次构造新的local
 // var相当于入栈(放到locals链表的头部)
 static Obj *new_lvar(char *name, Type *ty) {
   Obj *var = new_var(name, ty);
@@ -624,7 +625,7 @@ static Type *func_params(Token **rest, Token *tok, Type *ty) {
 
     cur = cur->next = copy_type(ty2);
   }
-  // todo 暂时屏蔽
+  // NOTE 这里默认会把main函数改成变长参数,但是我们不需要
   // if (cur == &head)
   //   is_variadic = true;
 
@@ -3259,8 +3260,8 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     // fn->va_area = new_lvar("__va_area__", array_of(ty_char, 136));
     unreachable();
   }
-  // 把allocate bottom,改成了一个指向uint的 return pc addr, 当进行ret的时候就取其中的值进行jump. 
-  fn->alloca_bottom = new_lvar("__ret_pc_address__", pointer_to(ty_uint));
+  // 把allocate bottom,暂时不懂?
+  fn->alloca_bottom = new_lvar("__alloca_size__", pointer_to(ty_char));
   tok = skip(tok, "{");
 
   // [https://www.sigbus.info/n1570#6.4.2.2p1] "__func__" is

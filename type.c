@@ -27,8 +27,8 @@ static Type *new_type(TypeKind kind, int size, int align) {
 
 bool is_integer(Type *ty) {
   TypeKind k = ty->kind;
-  return k == TY_BOOL || k == TY_CHAR || k == TY_SHORT ||
-         k == TY_INT  || k == TY_LONG || k == TY_ENUM;
+  return k == TY_BOOL || k == TY_CHAR || k == TY_SHORT || k == TY_INT ||
+         k == TY_LONG || k == TY_ENUM;
 }
 
 bool is_flonum(Type *ty) {
@@ -36,9 +36,7 @@ bool is_flonum(Type *ty) {
          ty->kind == TY_LDOUBLE;
 }
 
-bool is_numeric(Type *ty) {
-  return is_integer(ty) || is_flonum(ty);
-}
+bool is_numeric(Type *ty) { return is_integer(ty) || is_flonum(ty); }
 
 bool is_compatible(Type *t1, Type *t2) {
   if (t1 == t2)
@@ -94,8 +92,14 @@ Type *copy_type(Type *ty) {
   return ret;
 }
 
+/**
+ * @brief 构造一个指针类型, 指向base.
+ *
+ * @param base
+ * @return Type*
+ */
 Type *pointer_to(Type *base) {
-  Type *ty = new_type(TY_PTR, 8, 8);
+  Type *ty = new_type(TY_PTR, ADDR_TYPE_SIZE, ADDR_TYPE_SIZE);
   ty->base = base;
   ty->is_unsigned = true;
   return ty;
@@ -117,19 +121,15 @@ Type *array_of(Type *base, int len) {
 }
 
 Type *vla_of(Type *base, Node *len) {
-  Type *ty = new_type(TY_VLA, 8, 8);
+  Type *ty = new_type(TY_VLA, ADDR_TYPE_SIZE, ADDR_TYPE_SIZE);
   ty->base = base;
   ty->vla_len = len;
   return ty;
 }
 
-Type *enum_type(void) {
-  return new_type(TY_ENUM, 4, 4);
-}
+Type *enum_type(void) { return new_type(TY_ENUM, 4, 4); }
 
-Type *struct_type(void) {
-  return new_type(TY_STRUCT, 0, 1);
-}
+Type *struct_type(void) { return new_type(TY_STRUCT, 0, 1); }
 
 static Type *get_common_type(Type *ty1, Type *ty2) {
   if (ty1->base)
@@ -282,7 +282,8 @@ void add_type(Node *node) {
         return;
       }
     }
-    error_tok(node->tok, "statement expression returning void is not supported");
+    error_tok(node->tok,
+              "statement expression returning void is not supported");
     return;
   case ND_LABEL_VAL:
     node->ty = pointer_to(ty_void);

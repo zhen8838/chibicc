@@ -235,13 +235,13 @@ static void gen_addr(Node *node) {
   switch (node->kind) {
   case ND_VAR:
     // Variable-length array, which is always local.
-    if (node->var->ty->kind == TY_VLA) {
+    if (node->var->ty->kind == TY_VLA) { // 数组都一定是局部变量的.
       // println("  mov %d(%%rbp), %%rax", node->var->offset);
       mov("R.rax", "R.rbp", node->var->offset);
       return;
     }
 
-    // Local variable
+    // Local variable 因为他会被push到栈上,因此可以通过偏移取得.
     if (node->var->is_local) {
       // println("  lea %d(%%rbp), %%rax", node->var->offset);
       lea("R.rax", "R.rbp", node->var->offset);
@@ -439,6 +439,11 @@ static void store(Type *ty) {
     unreachable("最大32位");
 }
 
+/**
+ * @brief 检查rax是否为0, 如果是,那么req = 1, 否则req = 0;
+ *
+ * @param ty
+ */
 static void cmp_zero(Type *ty) {
   switch (ty->kind) {
   case TY_FLOAT:
@@ -459,10 +464,13 @@ static void cmp_zero(Type *ty) {
     return;
   }
 
-  if (is_integer(ty) && ty->size <= 4)
-    println("  cmp $0, %%eax");
-  else
-    println("  cmp $0, %%rax");
+  if (is_integer(ty) && ty->size <= 4) {
+    println("  I.BEQ(R.r0,R.rax,12) # rax == 0?");
+    println("  I.ADDI(R.req,R.r0,1) # if == 0, req = 1");
+    println("  I.JAL(R.r0,8)");
+    println("  I.ADDI(R.req,R.r0,0) # if != 0, req =0");
+  } else
+    unreachable();
 }
 
 enum { I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, F80 };
@@ -627,15 +635,17 @@ static bool has_flonum(Type *ty, int lo, int hi, int offset) {
          ty->kind == TY_DOUBLE;
 }
 
-static bool has_flonum1(Type *ty) { return has_flonum(ty, 0, 4, 0); }
+static bool has_flonum1(Type *ty) { return has_flonum(ty, 0, GP_WIDTH, 0); }
 
-static bool has_flonum2(Type *ty) { return has_flonum(ty, 4, 8, 0); }
+static bool has_flonum2(Type *ty) {
+  return has_flonum(ty, GP_WIDTH, GP_WIDTH * 2, 0);
+}
 
 static void push_struct(Type *ty) {
   int sz = align_to(ty->size, 4);
   // println("  sub $%d, %%rsp", sz);
   println("  I.ADDI(R.rsp,R.rsp, %d)", -sz); // 下移rsp
-  depth += sz / 4;
+  depth += sz / GP_WIDTH;
 
   // 然后一个一个byte向上写入
   for (int i = 0; i < ty->size; i++) {
@@ -655,7 +665,7 @@ static void push_struct(Type *ty) {
 static void push_args2(Node *args, bool first_pass) {
   if (!args)
     return;
-  // 递归的push,也就是最终顺序为 args1 .. args n
+  // 递归的push,也就是最终栈上的顺序为 args n,args n-1, args 6.
   push_args2(args->next, first_pass);
 
   //如果不是通过栈传值就pass.
@@ -715,9 +725,8 @@ static void push_args2(Node *args, bool first_pass) {
 static int push_args(Node *node) {
   int stack = 0, gp = 0, fp = 0;
 
-  // If the return type is a large struct/union, the caller passes
-  // a pointer to a buffer as if it were the first argument.
-  if (node->ret_buffer && node->ty->size > 16)
+  // 如果返回值时一个大的结构体,那么caller会存buffer的指针作为函数的第一个参数.
+  if (node->ret_buffer && node->ty->size > (GP_WIDTH * 2))
     gp++;
 
   // Load as many arguments to the registers as possible.
@@ -727,9 +736,9 @@ static int push_args(Node *node) {
     switch (ty->kind) {
     case TY_STRUCT:
     case TY_UNION:
-      if (ty->size > 8) { // 大于8用栈传值.
+      if (ty->size > GP_WIDTH * 2) { // 大于两个寄存器时用栈传参
         arg->pass_by_stack = true;
-        stack += align_to(ty->size, 4) / 4;
+        stack += align_to(ty->size, GP_WIDTH) / GP_WIDTH;
       } else {
         bool fp1 = has_flonum1(ty);
         bool fp2 = has_flonum2(ty);
@@ -739,7 +748,7 @@ static int push_args(Node *node) {
           gp = gp + !fp1 + !fp2;
         } else {
           arg->pass_by_stack = true;
-          stack += align_to(ty->size, 4) / 4;
+          stack += align_to(ty->size, GP_WIDTH) / GP_WIDTH;
         }
       }
       break;
@@ -766,7 +775,7 @@ static int push_args(Node *node) {
       }
     }
   }
-
+  // 如果 临时变量 + stack参数 没有对齐到2, 那就偏移1.
   if ((depth + stack) % 2 == 1) {
     // println("  sub $8, %%rsp");
     println("  I.ADDI(R.rsp,R.rsp,%d)", -GP_WIDTH);
@@ -1240,8 +1249,12 @@ static void gen_expr(Node *node) {
     // println("  add $%d, %%rsp", stack_args * 8);
     println("  I.ADD(R.r10,R.rax,R.r0)");
     load_imm("R.rax", fp);
-    println("  I.JALR(R.r11,R.r10,0) # pc + 4写入r11");             //
-    println("  I.ADDI(R.rsp,R.rsp, %d) # rsp下移", stack_args * 8); // rsp 指向
+    println("  I.AUIPC(R.11,0)");
+    println("  I.ADDI(R.11,R.r0,16) # R.11 指向return address");
+    push_reg("R.r11");
+    println("  I.JALR(R.r0,R.r10,0) # call *r10");
+    println("  I.ADDI(R.rsp,R.rsp, %d) # return后回退栈参数的偏移 rsp",
+            stack_args * ADDR_TYPE_SIZE);
 
     depth -= stack_args;
 
@@ -1470,39 +1483,71 @@ static void gen_expr(Node *node) {
     unreachable();
     return;
   case ND_EQ:
+    println("  I.BEQ(%s,%s,12)", ax, di);
+    println("  I.ADDI(%s,R.r0,0)", ax);
+    println("  I.JAL(R.r0,8)");
+    println("  I.ADDI(%s,R.r0,1)", ax);
+    return;
   case ND_NE:
+    println("  I.BNE(%s,%s,16)", ax, di);
+    println("  I.ADDI(%s,R.r0,0)", ax);
+    println("  I.JAL(R.r0,8)");
+    println("  I.ADDI(%s,R.r0,1)", ax);
+    return;
   case ND_LT:
-  case ND_LE:
-    println("  cmp %s, %s", di, ax);
-
-    if (node->kind == ND_EQ) {
-      println("  sete %%al");
-    } else if (node->kind == ND_NE) {
-      println("  setne %%al");
-    } else if (node->kind == ND_LT) {
-      if (node->lhs->ty->is_unsigned)
-        println("  setb %%al");
-      else
-        println("  setl %%al");
-    } else if (node->kind == ND_LE) {
-      if (node->lhs->ty->is_unsigned)
-        println("  setbe %%al");
-      else
-        println("  setle %%al");
+    if (node->lhs->ty->is_unsigned && node->rhs->ty->is_unsigned) {
+      println("  I.BLTU(%s,%s,16)", ax, di);
+    } else if (!node->lhs->ty->is_unsigned && !node->rhs->ty->is_unsigned) {
+      println("  I.BLT(%s,%s,16)", ax, di);
+    } else {
+      unreachable("The LT Lhs Rhs Type Not Equal!");
     }
+    println("  I.ADDI(%s,R.r0,0)", ax);
+    println("  I.JAL(R.r0,8)");
+    println("  I.ADDI(%s,R.r0,1)", ax);
+    return;
+  case ND_LE:
+    if (node->lhs->ty->is_unsigned && node->rhs->ty->is_unsigned) {
+      println("  I.BGEU(%s,%s,16)", di, ax);
+    } else if (!node->lhs->ty->is_unsigned && !node->rhs->ty->is_unsigned) {
+      println("  I.BGE(%s,%s,16)", di, ax);
+    } else {
+      unreachable("The LE Lhs Rhs Type Not Equal!");
+    }
+    println("  I.ADDI(%s,R.r0,0)", ax);
+    println("  I.JAL(R.r0,8)");
+    println("  I.ADDI(%s,R.r0,1)", ax);
+    // println("  cmp %s, %s", di, ax);
+    // if (node->kind == ND_EQ) {
+    //   println("  sete %%al");
+    // } else if (node->kind == ND_NE) {
+    //   println("  setne %%al");
+    // } else if (node->kind == ND_LT) {
+    //   if (node->lhs->ty->is_unsigned)
+    //     println("  setb %%al");
+    //   else
+    //     println("  setl %%al");
+    // } else if (node->kind == ND_LE) {
+    //   if (node->lhs->ty->is_unsigned)
+    //     println("  setbe %%al");
+    //   else
+    //     println("  setle %%al");
+    // }
 
-    println("  movzb %%al, %%rax");
+    // println("  movzb %%al, %%rax");
     return;
   case ND_SHL:
-    println("  mov %%rdi, %%rcx");
-    println("  shl %%cl, %s", ax);
+    // println("  mov %%rdi, %%rcx");
+    // println("  shl %%cl, %s", ax);
+    unreachable();
     return;
   case ND_SHR:
-    println("  mov %%rdi, %%rcx");
-    if (node->lhs->ty->is_unsigned)
-      println("  shr %%cl, %s", ax);
-    else
-      println("  sar %%cl, %s", ax);
+    // println("  mov %%rdi, %%rcx");
+    // if (node->lhs->ty->is_unsigned)
+    //   println("  shr %%cl, %s", ax);
+    // else
+    //   println("  sar %%cl, %s", ax);
+    unreachable();
     return;
   }
 
@@ -1518,9 +1563,12 @@ static void gen_stmt(Node *node) {
     int c = count();
     gen_expr(node->cond);
     cmp_zero(node->cond->ty);
-    println("  je  .L.else.%d", c);
+    // println("  je  .L.else.%d", c);
+    // 当req为0时,跳转到else
+    println("  I.BEQ(R.r0,R.req,.L.else.%d)", c);
     gen_stmt(node->then);
-    println("  jmp .L.end.%d", c);
+    // println("  jmp .L.end.%d", c);
+    println("  I.JAL(R.r0,.L.end.%d)", c);
     println(".L.else.%d:", c);
     if (node->els)
       gen_stmt(node->els);
@@ -1535,13 +1583,16 @@ static void gen_stmt(Node *node) {
     if (node->cond) {
       gen_expr(node->cond);
       cmp_zero(node->cond->ty);
-      println("  je %s", node->brk_label);
+      // println("  je %s", node->brk_label);
+      // 当req == 1 时跳转到label
+      println("  I.BLT(R.r0,R.req,%s)", node->brk_label);
     }
     gen_stmt(node->then);
     println("%s:", node->cont_label);
     if (node->inc)
       gen_expr(node->inc);
-    println("  jmp .L.begin.%d", c);
+    // println("  jmp .L.begin.%d", c);
+    println("  I.JAL(R.r0,.L.begin.%d)", c);
     println("%s:", node->brk_label);
     return;
   }
@@ -1552,7 +1603,8 @@ static void gen_stmt(Node *node) {
     println("%s:", node->cont_label);
     gen_expr(node->cond);
     cmp_zero(node->cond->ty);
-    println("  jne .L.begin.%d", c);
+    // println("  jne .L.begin.%d", c);
+    println("  I.BEQ(R.req,R.r0,.L.begin.%d)", c);
     println("%s:", node->brk_label);
     return;
   }
@@ -1596,9 +1648,10 @@ static void gen_stmt(Node *node) {
     println("  I.JAL(R.r0, @%s)", node->unique_label);
     return;
   case ND_GOTO_EXPR:
-    unreachable();
-    // gen_expr(node->lhs);
+    gen_expr(node->lhs);
     // println("  jmp *%%rax");
+    println("  I.LW(R.rax,R.rax,0)");
+    println("  I.JALR(R.r0,R.rax,0)  # goto ");
     return;
   case ND_LABEL:
     println("%s:", node->unique_label);
@@ -1612,8 +1665,7 @@ static void gen_stmt(Node *node) {
       switch (ty->kind) {
       case TY_STRUCT:
       case TY_UNION:
-        // NOTE 因为我们寄存器是32bit, 所以限制寄存器传值小于 8 byte
-        // if (ty->size <= 8)
+        // if (ty->size <= GP_WIDTH * 2)
         //   copy_struct_reg();
         // else
         copy_struct_mem();
@@ -1903,8 +1955,8 @@ static void emit_text(Obj *prog) {
     }
 
     // Save passed-by-register arguments to the stack
-    // 把帧上的内容copy到寄存器上(即寄存器传参)
-    int gp = 0, fp = 0;
+    // 虽然有的参数到了寄存器上,但是还是需要把寄存器上的参数移动到栈上.
+    int gp = 0, fp = 0; // 先清空寄存器.
     for (Obj *var = fn->params; var; var = var->next) {
       if (var->offset > 0)
         continue; // 寄存器传参的var的offset都是负的!, 因为这样便于支持变长参数.
@@ -1936,9 +1988,9 @@ static void emit_text(Obj *prog) {
       }
     }
 
-    // Emit code
+    // Emit code, 在body中通过push存储额外的临时变量,都会增加栈depth
     gen_stmt(fn->body);
-    assert(depth == 0);
+    assert(depth == 0); // 返回出去时必须没有多余的临时变量.
 
     // [https://www.sigbus.info/n1570#5.1.2.2.3p1] The C spec defines
     // a special rule for the main function. Reaching the end of the
@@ -1958,11 +2010,12 @@ static void emit_text(Obj *prog) {
       println("  I.END(R.rax)");
     } else {
       // 非main函数的return跳转到上一级函数
-      println("  I.LW(R.r11, R.rbp, %d) # 获得返回的pc位置",
-              check_imm(fn->alloca_bottom->offset, 12));
       println("  I.ADD(R.rsp, R.rbp, R.r0) # rsp指向rbp");
-      println("  I.LW(R.rbp,R.rsp,0) # rbp回退,出栈");
-      println("  I.ADDI(R.rsp,R.rsp,4)");
+      println("  I.LW(%s,R.rsp,0)", "R.rbp");
+      println(
+          "  I.ADDI(R.rsp,R.rsp,4) # rbp指向上一个函数帧顶"); // 此时rsp指向了return
+                                                              // address
+      lea("R.r11", "R.rsp", 0); // 加载返回地址
       println("  I.JALR(R.r0,R.r11,0) # return");
     }
   }

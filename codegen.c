@@ -389,6 +389,8 @@ static void load(Type *ty) {
 }
 
 // Store %rax to an address that the stack top is pointing to.
+// 函数返回之后,他的结果存在rax中,此时栈顶指向的是调用者的局部变量,因此将rax
+// store到栈顶即可.
 static void store(Type *ty) {
   // pop("%rdi");
   pop("R.rdi");
@@ -484,9 +486,9 @@ static void cmp_zero(Type *ty) {
 
   if (is_integer(ty) && ty->size <= 4) {
     println("  I.BEQ(R.r0,R.rax,12) # rax == 0?");
-    println("  I.ADDI(R.req,R.r0,1) # if == 0, req = 1");
+    println("  I.ADDI(R.req,R.r0,0) # rax != 0, req = 0");
     println("  I.JAL(R.r0,8)");
-    println("  I.ADDI(R.req,R.r0,0) # if != 0, req =0");
+    println("  I.ADDI(R.req,R.r0,1) # rax == 0, req = 1");
   } else
     unreachable();
 }
@@ -2055,10 +2057,11 @@ static void emit_text(Obj *prog) {
       println("  I.END(R.rax)");
     } else {
       // 非main函数的return跳转到上一级函数
-      println("  I.ADD(R.rsp, R.rbp, R.r0) # rsp指向rbp");
+      println("  I.ADD(R.rsp, R.rbp, R.r0) # rsp回到当前栈顶");
       println("  I.LW(%s,R.rsp,0)", "R.rbp");
-      println("  I.ADDI(R.rsp,R.rsp,4) # rsp指向ret pc");
-      println("  I.LW(R.r11,R.rsp,0) # r11 = ret pc");
+      println("  I.ADDI(R.rsp,R.rsp,4) # pop old rpb");
+      println("  I.LW(%s,R.rsp,0)", "R.r11");
+      println("  I.ADDI(R.rsp,R.rsp,4) # pop ret addr");
       println("  I.JALR(R.r0,R.r11,0) # return");
     }
   }

@@ -67,7 +67,7 @@ static int count(void) {
  */
 static void push() {
   println("  I.ADDI(R.rsp,R.rsp,-4)");
-  println("  I.SW(R.rsp,%s,0) # push", "R.rax");
+  println("  I.SW(R.rsp,R.rax,0) # push rax");
   depth++;
 }
 
@@ -100,7 +100,7 @@ static void load_imm(char *rd, int imm) {
     println("  I.LUI(%s, %d)", rd, high_bit);
     println("  I.ADDI(%s, %s, %d) # overflow load %d", rd, rd, low_bit, imm);
   } else {
-    println("  I.LUI(%s, %d)", rd, imm);
+    println("  I.ADDI(%s,R.r0, %d) # load %d", rd, imm, imm);
   }
 }
 
@@ -117,7 +117,7 @@ static void load_uimm(char *rd, uint32_t imm) {
     println("  I.LUI(%s, %d)", rd, high_bit);
     println("  I.ADDI(%s, %s, %d) # overflow load %d", rd, rd, low_bit, imm);
   } else {
-    println("  I.LUI(%s, %d)", rd, imm);
+    println("  I.ADDI(%s,R.r0, %d) # load %d", rd, imm, imm);
   }
 }
 
@@ -128,11 +128,11 @@ static void load_uimm(char *rd, uint32_t imm) {
  * @param rs
  * @param offset
  */
-static void lea(char *rd, char *rs, int offset) {
+static void lea(char *rd, char *rs, char *name, int offset) {
   if (is_signed_overflow(offset, 12)) {
     unreachable();
   }
-  println("  I.ADDI(%s,%s,%d) # lea", rd, rs, offset);
+  println("  I.ADDI(%s,%s,%d) # lea @%s", rd, rs, offset, name);
 }
 
 /**
@@ -147,17 +147,6 @@ static void lea_symobl(char *rd, char *symbol_name) {
   println("  I.ADDI(%s,%s,8) # pc offset", rd, rd);
   println("  I.ADDI(%s,%s,@%s) # lea", rd, rd,
           symbol_name); // 这里用汇编器取填值
-}
-
-/**
- * @brief 加一个立即数
- *
- * @param rd
- * @param offset
- */
-static void addi(char *rd, int offset) {
-  // 这里用汇编器取填值
-  println("  I.ADDI(%s,R.r0,%d)", rd, check_imm(offset, 12));
 }
 
 /**
@@ -244,7 +233,7 @@ static void gen_addr(Node *node) {
     // Local variable 因为他会被push到栈上,因此可以通过偏移取得.
     if (node->var->is_local) {
       // println("  lea %d(%%rbp), %%rax", node->var->offset);
-      lea("R.rax", "R.rbp", node->var->offset);
+      lea("R.rax", "R.rbp", node->var->name, node->var->offset);
       return;
     }
 
@@ -321,7 +310,11 @@ static void gen_addr(Node *node) {
   case ND_MEMBER:
     gen_addr(node->lhs);
     // println("  add $%d, %%rax", node->member->offset);
-    addi("R.rax", node->member->offset);
+
+    println("  I.ADDI(R.rax,R.rax,%d) # rax= &%s.%.*s",
+            check_imm(node->member->offset, 12), node->lhs->var->name,
+            (int)(node->member->name->next->loc - node->member->name->loc),
+            node->member->name->loc);
     return;
   case ND_FUNCALL:
     if (node->ret_buffer) {
@@ -338,7 +331,7 @@ static void gen_addr(Node *node) {
     break;
   case ND_VLA_PTR:
     // println("  lea %d(%%rbp), %%rax", node->var->offset);
-    lea("R.rax", "R.rbp", node->var->offset);
+    lea("R.rax", "R.rbp", node->var->name, node->var->offset);
     return;
   }
 
@@ -402,14 +395,39 @@ static void store(Type *ty) {
 
   switch (ty->kind) {
   case TY_STRUCT:
-  case TY_UNION:
-    for (int i = 0; i < ty->size; i++) {
-      // println("  mov %d(%%rax), %%r8b", i);
-      // println("  mov %%r8b, %d(%%rdi)", i);
-      // 从rax加载数据到寄存器,再store到 rdi指向的地址
-      println("  I.LBU(%s,%s,%d)", "R.r8", "R.rax", i);
-      println("  I.SB(%s,%s,%d)", "R.rdi", "R.r8", i);
+  case TY_UNION: {
+    int offset = 0;
+    int remain_size = ty->size;
+    int width = 4;
+    while (remain_size) {
+      while (remain_size / width < 1) {
+        width /= 2;
+      }
+      char *LS, *SS;
+      switch (width) {
+      case 1:
+        LS = "BU";
+        SS = "B";
+        break;
+      case 2:
+        LS = "HU";
+        SS = "H";
+        break;
+      case 4:
+        LS = "W";
+        SS = "W";
+        break;
+      default:
+        unreachable("The Store Width Error!");
+        break;
+      }
+      println("  I.L%s(R.r8,R.rax,%d)", LS, offset);
+      println("  I.S%s(R.rdi,R.r8,%d) # copy rax[%d:%d] to rdi", SS, offset,
+              offset, offset + width);
+      offset += width;
+      remain_size -= width;
     }
+  }
     return;
   case TY_FLOAT:
     // println("  movss %%xmm0, (%%rdi)");
@@ -641,18 +659,42 @@ static bool has_flonum2(Type *ty) {
   return has_flonum(ty, GP_WIDTH, GP_WIDTH * 2, 0);
 }
 
-static void push_struct(Type *ty) {
+static void push_struct(Type *ty, char *name) {
   int sz = align_to(ty->size, 4);
   // println("  sub $%d, %%rsp", sz);
-  println("  I.ADDI(R.rsp,R.rsp, %d)", -sz); // 下移rsp
+  println("  I.ADDI(R.rsp,R.rsp, %d) # push struct %s", -sz, name); // 下移rsp
   depth += sz / GP_WIDTH;
 
-  // 然后一个一个byte向上写入
-  for (int i = 0; i < ty->size; i++) {
-    // println("  mov %d(%%rax), %%r10b", i);
-    // println("  mov %%r10b, %d(%%rsp)", i);
-    println("  I.LBU(R.r10,R.rax,%d)", i);
-    println("  I.SB(R.rsp,R.r10,%d)", i);
+  int offset = 0;
+  int remain_size = ty->size;
+  int width = 4;
+  while (remain_size) {
+    while (remain_size / width < 1) {
+      width /= 2;
+    }
+    char *LS, *SS;
+    switch (width) {
+    case 1:
+      LS = "BU";
+      SS = "B";
+      break;
+    case 2:
+      LS = "HU";
+      SS = "H";
+      break;
+    case 4:
+      LS = "W";
+      SS = "W";
+      break;
+    default:
+      unreachable("The Store Width Error!");
+      break;
+    }
+    println("  I.L%s(R.r10,R.rax,%d)", LS, offset);
+    println("  I.S%s(R.rsp,R.r10,%d) # push rax[%d:%d] to rsp", SS, offset,
+            offset, offset + width);
+    offset += width;
+    remain_size -= width;
   }
 }
 
@@ -678,7 +720,7 @@ static void push_args2(Node *args, bool first_pass) {
   switch (args->ty->kind) {
   case TY_STRUCT:
   case TY_UNION:
-    push_struct(args->ty);
+    push_struct(args->ty, args->var->name);
     break;
   case TY_FLOAT:
   case TY_DOUBLE:
@@ -790,7 +832,7 @@ static int push_args(Node *node) {
   // a pointer to a buffer as if it were the first argument.
   if (node->ret_buffer && node->ty->size > 2 * GP_WIDTH) {
     // println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
-    lea("R.rax", "R.rbp", node->ret_buffer->offset);
+    lea("R.rax", "R.rbp", node->ret_buffer->name, node->ret_buffer->offset);
     push();
   }
 
@@ -1114,9 +1156,11 @@ static void gen_expr(Node *node) {
         if (is_signed_overflow(offset, 12)) {
           unreachable();
         }
-        println("  I.%s(R.rbp,R.r0,%d) # memset 0", inst, offset);
+        println("  I.%s(R.rbp,R.r0,%d) # %s[%d:%d]=0", inst, offset,
+                node->var->name, offset - node->var->offset,
+                offset - node->var->offset + word_size);
         size -= word_size;
-        offset -= word_size;
+        offset += word_size;
       } else {
         word_size /= 2;
       }
@@ -1249,8 +1293,8 @@ static void gen_expr(Node *node) {
     // println("  add $%d, %%rsp", stack_args * 8);
     println("  I.ADD(R.r10,R.rax,R.r0)");
     load_imm("R.rax", fp);
-    println("  I.AUIPC(R.11,0)");
-    println("  I.ADDI(R.11,R.r0,16) # R.11 指向return address");
+    println("  I.AUIPC(R.r11,0)");
+    println("  I.ADDI(R.r11,R.r11,20) # R.r11 指向return address");
     push_reg("R.r11");
     println("  I.JALR(R.r0,R.r10,0) # call *r10");
     println("  I.ADDI(R.rsp,R.rsp, %d) # return后回退栈参数的偏移 rsp",
@@ -1284,7 +1328,7 @@ static void gen_expr(Node *node) {
     if (node->ret_buffer && node->ty->size <= GP_WIDTH * 2) {
       copy_ret_buffer(node->ret_buffer);
       // println("  lea %d(%%rbp), %%rax", node->ret_buffer->offset);
-      lea("R.rbp", "R.rax", node->ret_buffer->offset);
+      lea("R.rbp", "R.rax", node->ret_buffer->name, node->ret_buffer->offset);
     }
 
     return;
@@ -1692,11 +1736,12 @@ static void assign_lvar_offsets(Obj *prog) {
   for (Obj *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function)
       continue;
-    // NOTE 进入函数开始分配local var.
     // If a function has many parameters, some parameters are
     // inevitably passed by stack rather than by register.
     // The first passed-by-stack parameter resides at RBP+16.
-    int top = 16;
+    // 栈传参数时,数据由调用者保存,进入子函数后,子函数的rbp 要回退 olb rbp和ret
+    // address,因此top = 2 * ADDR_TYPE_SIZE;
+    int top = 2 * ADDR_TYPE_SIZE;
     int bottom = 0;
 
     int gp = 0, fp = 0;
@@ -1708,9 +1753,9 @@ static void assign_lvar_offsets(Obj *prog) {
       switch (ty->kind) {
       case TY_STRUCT:
       case TY_UNION:
-        if (ty->size <= 16) {
-          bool fp1 = has_flonum(ty, 0, 8, 0);
-          bool fp2 = has_flonum(ty, 8, 16, 8);
+        if (ty->size <= 2 * GP_WIDTH) {
+          bool fp1 = has_flonum(ty, 0, GP_WIDTH, 0);
+          bool fp2 = has_flonum(ty, GP_WIDTH, GP_WIDTH * 2, GP_WIDTH);
           if (fp + fp1 + fp2 < FP_MAX && gp + !fp1 + !fp2 < GP_MAX) {
             fp = fp + fp1 + fp2;
             gp = gp + !fp1 + !fp2;
@@ -1730,9 +1775,9 @@ static void assign_lvar_offsets(Obj *prog) {
           continue;
       }
 
-      top = align_to(top, 8);
+      top = align_to(top, ADDR_TYPE_SIZE);
       var->offset = top;
-      top += var->ty->size;
+      top += var->ty->size; // top 是向上增加的.
     }
 
     // Assign offsets to pass-by-register parameters and local variables.
@@ -1913,7 +1958,7 @@ static void emit_text(Obj *prog) {
     push_reg("R.rbp");
     println("  I.ADD(R.rbp,R.rsp,R.r0)");
     println("  I.ADDI(R.rsp,R.rsp,%d)", check_imm(-fn->stack_size, 12));
-    println("  I.SW(R.rbp,R.r11, %d) # 把ret地址存储到alloca_bottom",
+    println("  I.SW(R.rbp,R.rsp, %d) # 存储rsp到alloca_bottom",
             check_imm(fn->alloca_bottom->offset, 12));
 
     // Save arg registers if function is variadic
@@ -2012,10 +2057,8 @@ static void emit_text(Obj *prog) {
       // 非main函数的return跳转到上一级函数
       println("  I.ADD(R.rsp, R.rbp, R.r0) # rsp指向rbp");
       println("  I.LW(%s,R.rsp,0)", "R.rbp");
-      println(
-          "  I.ADDI(R.rsp,R.rsp,4) # rbp指向上一个函数帧顶"); // 此时rsp指向了return
-                                                              // address
-      lea("R.r11", "R.rsp", 0); // 加载返回地址
+      println("  I.ADDI(R.rsp,R.rsp,4) # rsp指向ret pc");
+      println("  I.LW(R.r11,R.rsp,0) # r11 = ret pc");
       println("  I.JALR(R.r0,R.r11,0) # return");
     }
   }

@@ -307,15 +307,24 @@ static void gen_addr(Node *node) {
     gen_expr(node->lhs);
     gen_addr(node->rhs);
     return;
-  case ND_MEMBER:
+  case ND_MEMBER: {
     gen_addr(node->lhs);
     // println("  add $%d, %%rax", node->member->offset);
-
-    println("  I.ADDI(R.rax,R.rax,%d) # rax= &%s.%.*s",
-            check_imm(node->member->offset, 12), node->lhs->var->name,
+    char *var_name;
+    char *get_member;
+    if (node->lhs->kind == ND_DEREF) {
+      get_member = "->";
+      var_name = node->lhs->lhs->var->name;
+    } else {
+      get_member = ".";
+      var_name = node->lhs->var->name;
+    }
+    println("  I.ADDI(R.rax,R.rax,%d) # rax= &%s%s%.*s",
+            check_imm(node->member->offset, 12), var_name, get_member,
             (int)(node->member->name->next->loc - node->member->name->loc),
             node->member->name->loc);
     return;
+  }
   case ND_FUNCALL:
     if (node->ret_buffer) {
       gen_expr(node);
